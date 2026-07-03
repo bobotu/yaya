@@ -1,0 +1,198 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Yeelight Pro Gateway",
+        "description": "Connect to a Yeelight Pro gateway over the local LAN protocol.",
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        }
+      },
+      "import_filter": {
+        "title": "Import filter",
+        "description": "Choose which gateway rooms to import. Leave rooms empty to import all devices.",
+        "data": {
+          "include_light_groups": "Import light groups",
+          "import_room_ids": "Import rooms",
+          "wireless_switch_node_ids": "Wireless switch mode devices"
+        },
+        "data_description": {
+          "import_room_ids": "Leave empty to import all rooms.",
+          "wireless_switch_node_ids": "Selected relay switches are exposed as programmable scene switches. Unselected switches are exposed as controllable relay switches."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the gateway."
+    },
+    "abort": {
+      "already_configured": "This gateway is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Import filter",
+        "description": "Choose which gateway rooms to import. Leave rooms empty to import all devices.",
+        "data": {
+          "include_light_groups": "Import light groups",
+          "import_room_ids": "Import rooms",
+          "wireless_switch_node_ids": "Wireless switch mode devices"
+        },
+        "data_description": {
+          "import_room_ids": "Leave empty to import all rooms.",
+          "wireless_switch_node_ids": "Selected relay switches are exposed as programmable scene switches. Unselected switches are exposed as controllable relay switches."
+        }
+      }
+    }
+  },
+  "device": {
+    "gateway": {
+      "name": "Yeelight Pro Gateway {host}"
+    }
+  },
+  "device_model": {
+    "air_conditioner_controller": "Air conditioner controller",
+    "bath_heater": "Bath heater",
+    "curtain": "Curtain",
+    "double_relay_switch": "Double relay switch",
+    "dream_curtain": "Dream curtain",
+    "knob_panel": "Knob panel",
+    "light": "Light",
+    "light_group": "Light group",
+    "multi_key_relay_switch": "Multi-key relay switch",
+    "scene_panel": "Scene panel",
+    "sensor": "Sensor",
+    "yeelight_pro_device": "Yeelight Pro device"
+  },
+  "entity": {
+    "climate": {
+      "air_conditioner": {
+        "name": "Air conditioner {index}"
+      },
+      "bath_heater_climate": {
+        "name": "Bath heater"
+      }
+    },
+    "binary_sensor": {
+      "alarm": {
+        "name": "Alarm"
+      },
+      "battery_charging": {
+        "name": "Battery charging"
+      },
+      "door": {
+        "name": "Door"
+      },
+      "motion": {
+        "name": "Motion"
+      },
+      "occupancy": {
+        "name": "Occupancy"
+      },
+      "relay_state": {
+        "name": "Relay {channel} state"
+      }
+    },
+    "event": {
+      "control_events": {
+        "name": "Control {index} events"
+      },
+      "key_events": {
+        "name": "Key {index} events"
+      }
+    },
+    "fan": {
+      "fan": {
+        "name": "Fan"
+      },
+      "ventilation": {
+        "name": "Ventilation"
+      }
+    },
+    "number": {
+      "air_conditioner_deflector": {
+        "name": "Air conditioner deflector"
+      },
+      "delay_off": {
+        "name": "Delay off"
+      },
+      "heat_level": {
+        "name": "Heat level"
+      }
+    },
+    "select": {
+      "bath_mode": {
+        "name": "Bath mode"
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      },
+      "humidity": {
+        "name": "Humidity"
+      },
+      "light_level": {
+        "name": "Light level"
+      },
+      "luminance": {
+        "name": "Illuminance"
+      },
+      "temperature": {
+        "name": "Temperature"
+      }
+    },
+    "switch": {
+      "backlight": {
+        "name": "Backlight"
+      },
+      "remote_controller": {
+        "name": "Remote controller"
+      },
+      "relay": {
+        "name": "Relay {channel}"
+      }
+    }
+  },
+  "exceptions": {
+    "gateway_action_failed": {
+      "message": "The Yeelight Pro gateway command failed."
+    },
+    "gateway_protocol_error": {
+      "message": "The Yeelight Pro gateway returned an invalid response."
+    },
+    "gateway_request_timeout": {
+      "message": "The Yeelight Pro gateway did not respond before the request timed out."
+    },
+    "gateway_unavailable": {
+      "message": "The Yeelight Pro gateway connection is not available."
+    },
+    "invalid_gateway_command": {
+      "message": "The Yeelight Pro command is invalid: {error}"
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "panel_click": "Panel button clicked",
+      "panel_hold": "Panel button held",
+      "panel_release": "Panel button released",
+      "knob_spin": "Knob rotated"
+    },
+    "trigger_subtype": {
+      "key_1": "Key 1",
+      "key_2": "Key 2",
+      "key_3": "Key 3",
+      "key_4": "Key 4",
+      "key_5": "Key 5",
+      "key_6": "Key 6",
+      "idx_1": "Knob 1",
+      "idx_2": "Knob 2",
+      "idx_3": "Knob 3",
+      "idx_4": "Knob 4",
+      "idx_5": "Knob 5",
+      "idx_6": "Knob 6"
+    }
+  }
+}

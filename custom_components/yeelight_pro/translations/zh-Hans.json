@@ -1,0 +1,198 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Yeelight Pro 网关",
+        "description": "通过本地局域网协议连接 Yeelight Pro 网关。",
+        "data": {
+          "host": "主机",
+          "port": "端口"
+        }
+      },
+      "import_filter": {
+        "title": "导入过滤",
+        "description": "选择要从哪些网关房间导入设备。房间留空表示导入全部设备。",
+        "data": {
+          "include_light_groups": "导入灯组",
+          "import_room_ids": "导入房间",
+          "wireless_switch_node_ids": "无线开关模式设备"
+        },
+        "data_description": {
+          "import_room_ids": "留空表示导入全部房间。",
+          "wireless_switch_node_ids": "选中的继电器开关会作为可编程情景开关暴露；未选中的开关会作为可控制的继电器开关暴露。"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接到网关。"
+    },
+    "abort": {
+      "already_configured": "此网关已配置。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "导入过滤",
+        "description": "选择要从哪些网关房间导入设备。房间留空表示导入全部设备。",
+        "data": {
+          "include_light_groups": "导入灯组",
+          "import_room_ids": "导入房间",
+          "wireless_switch_node_ids": "无线开关模式设备"
+        },
+        "data_description": {
+          "import_room_ids": "留空表示导入全部房间。",
+          "wireless_switch_node_ids": "选中的继电器开关会作为可编程情景开关暴露；未选中的开关会作为可控制的继电器开关暴露。"
+        }
+      }
+    }
+  },
+  "device": {
+    "gateway": {
+      "name": "Yeelight Pro 网关 {host}"
+    }
+  },
+  "device_model": {
+    "air_conditioner_controller": "空调控制器",
+    "bath_heater": "浴霸",
+    "curtain": "窗帘",
+    "double_relay_switch": "双键继电器开关",
+    "dream_curtain": "梦幻帘",
+    "knob_panel": "旋钮面板",
+    "light": "灯",
+    "light_group": "灯组",
+    "multi_key_relay_switch": "多键继电器开关",
+    "scene_panel": "情景面板",
+    "sensor": "传感器",
+    "yeelight_pro_device": "Yeelight Pro 设备"
+  },
+  "entity": {
+    "climate": {
+      "air_conditioner": {
+        "name": "空调 {index}"
+      },
+      "bath_heater_climate": {
+        "name": "浴霸"
+      }
+    },
+    "binary_sensor": {
+      "alarm": {
+        "name": "告警"
+      },
+      "battery_charging": {
+        "name": "电池充电"
+      },
+      "door": {
+        "name": "门"
+      },
+      "motion": {
+        "name": "运动"
+      },
+      "occupancy": {
+        "name": "人体存在"
+      },
+      "relay_state": {
+        "name": "继电器 {channel} 状态"
+      }
+    },
+    "event": {
+      "control_events": {
+        "name": "控制 {index} 事件"
+      },
+      "key_events": {
+        "name": "按键 {index} 事件"
+      }
+    },
+    "fan": {
+      "fan": {
+        "name": "风扇"
+      },
+      "ventilation": {
+        "name": "换气"
+      }
+    },
+    "number": {
+      "air_conditioner_deflector": {
+        "name": "空调导风板"
+      },
+      "delay_off": {
+        "name": "延时关闭"
+      },
+      "heat_level": {
+        "name": "制热档位"
+      }
+    },
+    "select": {
+      "bath_mode": {
+        "name": "浴霸模式"
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "电池"
+      },
+      "humidity": {
+        "name": "湿度"
+      },
+      "light_level": {
+        "name": "光照等级"
+      },
+      "luminance": {
+        "name": "照度"
+      },
+      "temperature": {
+        "name": "温度"
+      }
+    },
+    "switch": {
+      "backlight": {
+        "name": "背光"
+      },
+      "remote_controller": {
+        "name": "遥控器"
+      },
+      "relay": {
+        "name": "继电器 {channel}"
+      }
+    }
+  },
+  "exceptions": {
+    "gateway_action_failed": {
+      "message": "Yeelight Pro 网关命令失败。"
+    },
+    "gateway_protocol_error": {
+      "message": "Yeelight Pro 网关返回了无效响应。"
+    },
+    "gateway_request_timeout": {
+      "message": "Yeelight Pro 网关未在请求超时前响应。"
+    },
+    "gateway_unavailable": {
+      "message": "Yeelight Pro 网关连接当前不可用。"
+    },
+    "invalid_gateway_command": {
+      "message": "Yeelight Pro 命令无效：{error}"
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "panel_click": "面板按键点击",
+      "panel_hold": "面板按键长按",
+      "panel_release": "面板按键释放",
+      "knob_spin": "旋钮旋转"
+    },
+    "trigger_subtype": {
+      "key_1": "按键 1",
+      "key_2": "按键 2",
+      "key_3": "按键 3",
+      "key_4": "按键 4",
+      "key_5": "按键 5",
+      "key_6": "按键 6",
+      "idx_1": "旋钮 1",
+      "idx_2": "旋钮 2",
+      "idx_3": "旋钮 3",
+      "idx_4": "旋钮 4",
+      "idx_5": "旋钮 5",
+      "idx_6": "旋钮 6"
+    }
+  }
+}

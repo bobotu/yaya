@@ -1,0 +1,13 @@
+{
+  "domain": "yeelight_pro",
+  "name": "Yeelight Pro",
+  "codeowners": ["@bobotu"],
+  "config_flow": true,
+  "documentation": "https://github.com/bobotu/yaya#readme",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/bobotu/yaya/issues",
+  "loggers": ["custom_components.yeelight_pro"],
+  "requirements": [],
+  "version": "0.1.0"
+}

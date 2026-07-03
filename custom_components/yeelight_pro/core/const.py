@@ -1,0 +1,14 @@
+DEFAULT_VERSION = "1.0"
+DEFAULT_MESH_NODE_TYPE = 2
+MESH_GROUP_NODE_TYPE = 4
+
+GATEWAY_DISCOVERY_PORT = 1982
+GATEWAY_CONTROL_PORT = 65443
+GATEWAY_DISCOVERY_PAYLOAD = b"YEELIGHT_GATEWAY_CONTROL_DISCOVER"
+
+SWITCH_MORE_KEYS = ("1-sp", "2-sp", "3-sp", "4-sp", "5-sp", "6-sp")
+SWITCH_DOUBLE_KEYS = ("1-p", "2-p")
+
+PANEL_EVENT_VALUES = ("panel.click", "panel.hold", "panel.release")
+KNOB_EVENT_VALUES = ("knob.spin",)
+MOTION_EVENT_VALUES = ("motion.true", "motion.false")
