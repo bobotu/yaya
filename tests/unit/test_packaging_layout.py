@@ -46,15 +46,11 @@ class PackagingLayoutTests(unittest.TestCase):
             self.assertEqual(translations["entity"]["event"]["key_events"]["name"].count("{index}"), 1)
             self.assertEqual(translations["entity"]["event"]["control_events"]["name"].count("{index}"), 1)
             self.assertIn("gateway", translations["device"])
-            self.assertIn("light", translations["device_model"])
-            self.assertIn("dream_curtain", translations["device_model"])
-            self.assertIn("scene_panel", translations["device_model"])
+            self.assertNotIn("device_model", translations)
             self.assertIn("panel_click", translations["device_automation"]["trigger_type"])
 
         self.assertEqual(en["entity"]["switch"]["relay"]["name"], "Relay {channel}")
-        self.assertEqual(en["device_model"]["light"], "Light")
         self.assertEqual(zh_hans["entity"]["switch"]["relay"]["name"], "继电器 {channel}")
-        self.assertEqual(zh_hans["device_model"]["light"], "灯")
 
     def test_pyproject_packages_layered_library_for_cli_without_ha_dependency(self) -> None:
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))

@@ -10,7 +10,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers import translation
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -40,7 +39,6 @@ _LOGGER = logging.getLogger(__name__)
 
 EventCallback = Callable[[GatewayEvent], None]
 
-MODEL_TRANSLATION_PREFIX = f"component.{DOMAIN}.device_model."
 DEFAULT_DEVICE_MODELS = {
     "air_conditioner_controller": "Air conditioner controller",
     "bath_heater": "Bath heater",
@@ -86,7 +84,6 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         self._remove_event_listener: Callable[[], None] | None = None
         self._remove_state_listener: Callable[[], None] | None = None
         self._event_listeners: dict[str, list[EventCallback]] = {}
-        self._device_model_translations: dict[str, str] = {}
         self._unavailable_logged = False
         self._unavailable_since: datetime | None = None
         self._last_snapshot: tuple[object, ...] | None = None
@@ -100,7 +97,6 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         )
 
     async def async_setup(self) -> None:
-        await self._async_load_device_model_translations()
         self._remove_state_listener = self.gateway.add_state_listener(self._async_handle_state_update)
         self._remove_event_listener = self.gateway.add_event_listener(self._async_handle_event)
         await self._async_connect_and_sync()
@@ -377,7 +373,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
 
     def device_model_name(self, node: TopologyNode) -> str:
         key = device_model_key(node)
-        return self._device_model_translations.get(key, DEFAULT_DEVICE_MODELS[key])
+        return DEFAULT_DEVICE_MODELS[key]
 
     def _register_gateway_device(self) -> None:
         registry = dr.async_get(self.hass)
@@ -389,19 +385,6 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
             translation_placeholders={"host": self.host},
             configuration_url=f"http://{self.host}",
         )
-
-    async def _async_load_device_model_translations(self) -> None:
-        translations = await translation.async_get_translations(
-            self.hass,
-            self.hass.config.language,
-            "device_model",
-            integrations=[DOMAIN],
-        )
-        self._device_model_translations = {
-            key.removeprefix(MODEL_TRANSLATION_PREFIX): value
-            for key, value in translations.items()
-            if key.startswith(MODEL_TRANSLATION_PREFIX)
-        }
 
 
 def _error_diagnostics(exc: BaseException | None) -> dict[str, str] | None:

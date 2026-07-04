@@ -52,20 +52,6 @@
       "name": "Yeelight Pro 网关 {host}"
     }
   },
-  "device_model": {
-    "air_conditioner_controller": "空调控制器",
-    "bath_heater": "浴霸",
-    "curtain": "窗帘",
-    "double_relay_switch": "双键继电器开关",
-    "dream_curtain": "梦幻帘",
-    "knob_panel": "旋钮面板",
-    "light": "灯",
-    "light_group": "灯组",
-    "multi_key_relay_switch": "多键继电器开关",
-    "scene_panel": "情景面板",
-    "sensor": "传感器",
-    "yeelight_pro_device": "Yeelight Pro 设备"
-  },
   "entity": {
     "climate": {
       "air_conditioner": {
