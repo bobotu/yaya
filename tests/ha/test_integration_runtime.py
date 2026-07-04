@@ -857,7 +857,7 @@ async def test_bath_heater_standard_platform_entities(
         await hass.async_block_till_done()
 
 
-async def test_device_registry_uses_translated_model_without_protocol_diagnostics(
+async def test_device_registry_uses_model_without_protocol_diagnostics(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -899,7 +899,7 @@ async def test_device_registry_uses_translated_model_without_protocol_diagnostic
         await hass.async_block_till_done()
 
 
-async def test_device_registry_model_uses_simplified_chinese_translations(
+async def test_device_registry_model_is_not_translated(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -912,15 +912,15 @@ async def test_device_registry_model_uses_simplified_chinese_translations(
 
         light = device_registry.async_get_device(identifiers={(DOMAIN, "127.0.0.1:65443:light-1")})
         assert light is not None
-        assert light.model == "灯"
+        assert light.model == "Light"
 
         cover = device_registry.async_get_device(identifiers={(DOMAIN, "127.0.0.1:65443:curtain-1")})
         assert cover is not None
-        assert cover.model == "梦幻帘"
+        assert cover.model == "Dream curtain"
 
         knob_panel = device_registry.async_get_device(identifiers={(DOMAIN, "127.0.0.1:65443:knob-panel-1")})
         assert knob_panel is not None
-        assert knob_panel.model == "旋钮面板"
+        assert knob_panel.model == "Knob panel"
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

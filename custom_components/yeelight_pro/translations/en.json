@@ -52,20 +52,6 @@
       "name": "Yeelight Pro Gateway {host}"
     }
   },
-  "device_model": {
-    "air_conditioner_controller": "Air conditioner controller",
-    "bath_heater": "Bath heater",
-    "curtain": "Curtain",
-    "double_relay_switch": "Double relay switch",
-    "dream_curtain": "Dream curtain",
-    "knob_panel": "Knob panel",
-    "light": "Light",
-    "light_group": "Light group",
-    "multi_key_relay_switch": "Multi-key relay switch",
-    "scene_panel": "Scene panel",
-    "sensor": "Sensor",
-    "yeelight_pro_device": "Yeelight Pro device"
-  },
   "entity": {
     "climate": {
       "air_conditioner": {
