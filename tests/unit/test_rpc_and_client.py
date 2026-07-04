@@ -171,7 +171,9 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
                 received.append(request)
                 writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8"))
                 writer.write(b"\r\n")
-                writer.write(b'{"method":"gateway_post.prop","nodes":[{"id":"light-1","nt":2,"params":{"p":true}}]}\r\n')
+                writer.write(
+                    b'{"method":"gateway_post.prop","nodes":[{"id":"light-1","nt":2,"params":{"p":true}}]}\r\n'
+                )
                 await writer.drain()
                 try:
                     extra = await asyncio.wait_for(reader.readline(), timeout=0.1)
