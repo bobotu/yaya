@@ -84,8 +84,7 @@ custom **Integration** repository, install it, restart Home Assistant, and add
 
 ## Supported mapping
 
-- `light`: imports known light nodes. Light groups (`nt=4`) are skipped by
-  default and can be enabled with the `include_light_groups` option.
+- `light`: imports known light nodes, including light groups (`nt=4`).
 - `cover`: maps curtains to open, close, stop, and target position. Dream
   curtain tilt is enabled when the gateway reports `type=22` or explicit
   curtain subtype `pt=22`.

@@ -14,7 +14,6 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_IMPORT_ROOM_IDS,
-    CONF_INCLUDE_LIGHT_GROUPS,
     CONF_SWITCH_MODES,
     CONF_WIRELESS_SWITCH_NODE_IDS,
     DEFAULT_PORT,
@@ -92,7 +91,6 @@ class YeelightProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="import_filter",
             data_schema=_import_filter_schema(
-                include_light_groups=False,
                 import_room_ids=_all_room_option_values(self._gateway_options.room_options),
                 room_options=self._gateway_options.room_options,
                 wireless_switch_node_ids=[],
@@ -127,7 +125,6 @@ class YeelightProOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=_import_filter_schema(
-                include_light_groups=self.config_entry.options.get(CONF_INCLUDE_LIGHT_GROUPS, False),
                 import_room_ids=_selected_or_all_room_ids(
                     self.config_entry.options.get(CONF_IMPORT_ROOM_IDS, []),
                     room_options,
@@ -165,7 +162,6 @@ async def _async_gateway_options(host: str, port: int) -> GatewayOptions:
 
 def _import_filter_schema(
     *,
-    include_light_groups: bool,
     import_room_ids: list[str],
     room_options: list[selector.SelectOptionDict],
     wireless_switch_node_ids: list[str],
@@ -173,7 +169,6 @@ def _import_filter_schema(
 ) -> vol.Schema:
     return vol.Schema(
         {
-            vol.Optional(CONF_INCLUDE_LIGHT_GROUPS, default=include_light_groups): bool,
             vol.Optional(CONF_IMPORT_ROOM_IDS, default=list(import_room_ids)): selector.SelectSelector(
                 selector.SelectSelectorConfig(
                     options=room_options,
@@ -201,7 +196,6 @@ def _options_data(
 ) -> dict[str, Any]:
     wireless_switch_node_ids = {str(node_id) for node_id in user_input.get(CONF_WIRELESS_SWITCH_NODE_IDS, [])}
     return {
-        CONF_INCLUDE_LIGHT_GROUPS: user_input.get(CONF_INCLUDE_LIGHT_GROUPS, False),
         CONF_IMPORT_ROOM_IDS: [str(room_id) for room_id in user_input.get(CONF_IMPORT_ROOM_IDS, [])],
         CONF_SWITCH_MODES: {
             str(option["value"]): SWITCH_MODE_WIRELESS

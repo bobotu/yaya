@@ -94,14 +94,13 @@ def device_model_key(node: TopologyNode) -> str:
 def should_import_node(
     node: TopologyNode,
     *,
-    include_light_groups: bool,
     import_room_ids: Iterable[str | int] = (),
     room_id: str | int | None = None,
 ) -> bool:
     if node.nt == NodeType.MESH_SUBDEVICE:
         importable = True
     else:
-        importable = include_light_groups and node.nt == NodeType.MESH_GROUP and light_device_type(node) is not None
+        importable = node.nt == NodeType.MESH_GROUP and light_device_type(node) is not None
     if not importable:
         return False
 
