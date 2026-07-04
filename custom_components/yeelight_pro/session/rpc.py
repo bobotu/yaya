@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -19,7 +20,9 @@ from ..core.protocol import build_request, parse_line
 
 JSONDict = dict[str, Any]
 PushListener = Callable[[Mapping[str, Any]], Awaitable[None] | None]
+WriteCallback = Callable[[], None]
 MAX_RPC_FRAME_BYTES = 16 * 1024 * 1024
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class _QueuedRequest:
     method: str
     payload: Mapping[str, Any] | None
     future: asyncio.Future[JSONDict]
+    on_written: WriteCallback | None = None
 
 
 class GatewayRPC:
@@ -152,6 +156,7 @@ class GatewayRPC:
         method: str,
         payload: Mapping[str, Any] | None = None,
         *,
+        on_written: WriteCallback | None = None,
         timeout: float | None = None,
     ) -> JSONDict:
         if self._writer is None or self._writer.is_closing() or self._writer_task is None:
@@ -161,7 +166,7 @@ class GatewayRPC:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[JSONDict] = loop.create_future()
         self._pending[request_id] = future
-        self._write_queue.put_nowait(_QueuedRequest(request_id, method, payload, future))
+        self._write_queue.put_nowait(_QueuedRequest(request_id, method, payload, future, on_written))
 
         try:
             return await asyncio.wait_for(future, timeout or self.request_timeout)
@@ -202,6 +207,11 @@ class GatewayRPC:
                 try:
                     writer.write(wire_payload)
                     await writer.drain()
+                    if queued.on_written is not None:
+                        try:
+                            queued.on_written()
+                        except Exception:  # noqa: BLE001 - callbacks must not kill the writer task.
+                            _LOGGER.exception("Gateway RPC write callback failed for %s", queued.method)
                 except (ConnectionError, OSError) as exc:
                     error = ConnectionClosed(str(exc))
                     self._pending.pop(queued.request_id, None)

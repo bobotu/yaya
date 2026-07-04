@@ -114,7 +114,6 @@ class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
         await async_call_gateway(
             self.coordinator.gateway.set_node_props(node.id, {self.entity_description.key: round(value)}, nt=node.nt)
         )
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
 
 def _indexed_props(node: Any, suffix: str) -> tuple[str, ...]:

@@ -81,7 +81,6 @@ class YeelightProBathHeaterFan(YeelightProEntity, FanEntity):
             return
         level = max(0, min(3, round(percentage * 3 / 100)))
         await async_call_gateway(self.coordinator.gateway.set_node_props(node.id, {self._prop: level}, nt=node.nt))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
 
 def _level(node: Any, prop: str) -> int | None:

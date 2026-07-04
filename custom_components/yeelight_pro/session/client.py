@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -13,14 +15,17 @@ from ..core.const import DEFAULT_MESH_NODE_TYPE, GATEWAY_CONTROL_PORT
 from ..core.devices.base import Device
 from ..core.devices.factory import create_device
 from ..core.events import GatewayEvent, iter_gateway_events
+from ..core.exceptions import YeelightProError
 from ..core.updates import PropertyChange
 from .rpc import GatewayRPC
 from .state import GatewayState
 
 JSONDict = dict[str, Any]
+WriteCallback = Callable[[], None]
 EventListener = Callable[[GatewayEvent], Awaitable[None] | None]
 PropertyListener = Callable[[PropertyChange], Awaitable[None] | None]
 StateListener = Callable[[Mapping[str, Any]], Awaitable[None] | None]
+_LOGGER = logging.getLogger(__name__)
 
 
 class GatewaySessionState(StrEnum):
@@ -56,10 +61,15 @@ class YeelightProGateway:
         self.last_full_sync_at: datetime | None = None
         self.last_full_sync_source: str | None = None
         self.full_prop_timeout = 5.0
+        self.property_sync_timeout = 5.0
+        self.property_push_coalesce_window = 2.0
         self._event_listeners: list[EventListener] = []
         self._property_listeners: list[PropertyListener] = []
         self._state_listeners: list[StateListener] = []
         self._full_prop_event = asyncio.Event()
+        self._pending_property_sync_writes: deque[float] = deque()
+        self._property_sync_watchdog: asyncio.Task[None] | None = None
+        self._property_sync_recovery_lock = asyncio.Lock()
         self.rpc.add_push_listener(self._handle_push)
 
     async def __aenter__(self) -> YeelightProGateway:
@@ -84,6 +94,7 @@ class YeelightProGateway:
 
     async def close(self) -> None:
         self.session_state = GatewaySessionState.CLOSING
+        self._clear_pending_property_sync()
         await self.rpc.close()
         self.session_state = GatewaySessionState.DISCONNECTED
 
@@ -129,9 +140,10 @@ class YeelightProGateway:
         method: str,
         payload: Mapping[str, Any] | None = None,
         *,
+        on_written: WriteCallback | None = None,
         timeout: float | None = None,
     ) -> JSONDict:
-        return await self.rpc.request(method, payload, timeout=timeout)
+        return await self.rpc.request(method, payload, on_written=on_written, timeout=timeout)
 
     async def get_topology(self) -> JSONDict:
         return await self.request("gateway_get.topology")
@@ -167,7 +179,8 @@ class YeelightProGateway:
         if not payload:
             raise ValueError("set_prop requires at least one node command")
 
-        return await self.request("gateway_set.prop", {"nodes": payload})
+        on_written = self._record_property_sync_write if any(_expects_property_push(item) for item in payload) else None
+        return await self.request("gateway_set.prop", {"nodes": payload}, on_written=on_written)
 
     async def set_scenes(self, scenes: Iterable[Mapping[str, Any]]) -> JSONDict:
         payload = [dict(scene) for scene in scenes]
@@ -259,6 +272,8 @@ class YeelightProGateway:
             self.last_full_sync_at = datetime.now(UTC)
             self.last_full_sync_source = "push"
             self._full_prop_event.set()
+        if message.get("method") == "gateway_post.prop":
+            self._ack_property_sync_writes()
         state_updated = bool(changes)
         if changes:
             for change in changes:
@@ -273,16 +288,86 @@ class YeelightProGateway:
                 self.session_state = GatewaySessionState.WAITING_FULL_PROP
 
         if state_updated:
-            for listener in list(self._state_listeners):
-                result = listener(message)
-                if inspect.isawaitable(result):
-                    await result
+            await self._notify_state_listeners(message)
 
         for event in iter_gateway_events(message):
             for listener in list(self._event_listeners):
                 result = listener(event)
                 if inspect.isawaitable(result):
                     await result
+
+    async def _notify_state_listeners(self, message: Mapping[str, Any]) -> None:
+        for listener in list(self._state_listeners):
+            result = listener(message)
+            if inspect.isawaitable(result):
+                await result
+
+    def _record_property_sync_write(self) -> None:
+        self._pending_property_sync_writes.append(asyncio.get_running_loop().time())
+        if self._property_sync_watchdog is not None:
+            return
+        self._property_sync_watchdog = asyncio.create_task(
+            self._watch_property_sync_writes(),
+            name="yeelight-pro-property-sync-watchdog",
+        )
+
+    def _ack_property_sync_writes(self) -> None:
+        received_at = asyncio.get_running_loop().time()
+        window_start = received_at - self.property_push_coalesce_window
+        self._pending_property_sync_writes = deque(
+            timestamp
+            for timestamp in self._pending_property_sync_writes
+            if not window_start <= timestamp <= received_at
+        )
+        if not self._pending_property_sync_writes:
+            self._cancel_property_sync_watchdog()
+
+    def _clear_pending_property_sync(self) -> None:
+        self._pending_property_sync_writes.clear()
+        self._cancel_property_sync_watchdog()
+
+    def _cancel_property_sync_watchdog(self) -> None:
+        if self._property_sync_watchdog is not None:
+            self._property_sync_watchdog.cancel()
+            self._property_sync_watchdog = None
+
+    def _discard_property_sync_writes_before(self, cutoff: float) -> None:
+        while self._pending_property_sync_writes and self._pending_property_sync_writes[0] <= cutoff:
+            self._pending_property_sync_writes.popleft()
+
+    async def _watch_property_sync_writes(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.property_sync_timeout)
+                if not self._pending_property_sync_writes:
+                    self._property_sync_watchdog = None
+                    return
+
+                now = asyncio.get_running_loop().time()
+                if self._pending_property_sync_writes[0] <= now - self.property_sync_timeout:
+                    await self._recover_missing_property_sync(now)
+                    if not self._pending_property_sync_writes:
+                        self._property_sync_watchdog = None
+                        return
+        except asyncio.CancelledError:
+            return
+
+    async def _recover_missing_property_sync(self, recovery_started_at: float) -> None:
+        async with self._property_sync_recovery_lock:
+            if not self.is_connected:
+                self._clear_pending_property_sync()
+                return
+            _LOGGER.debug("Yeelight Pro gateway property push timeout after set; running full sync")
+            try:
+                self.session_state = GatewaySessionState.RECOVERING
+                await self.sync()
+            except (OSError, TimeoutError, YeelightProError) as exc:
+                _LOGGER.debug("Yeelight Pro gateway recovery sync failed after property push timeout: %s", exc)
+                if self.is_connected:
+                    await self.close()
+                return
+            self._discard_property_sync_writes_before(recovery_started_at - self.property_push_coalesce_window)
+            await self._notify_state_listeners({"method": "gateway_sync.recovery"})
 
     @staticmethod
     def events_from_message(message: Mapping[str, Any]) -> list[GatewayEvent]:
@@ -301,3 +386,18 @@ def _id_payload(item_id: str | int | None) -> Mapping[str, Any] | None:
 def _validate_range(name: str, value: int, minimum: int, maximum: int) -> None:
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
+
+
+def _node_key(node_id: object) -> str | None:
+    if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
+        return None
+    return str(node_id)
+
+
+def _expects_property_push(item: Mapping[str, Any]) -> bool:
+    if _node_key(item.get("id")) is None:
+        return False
+    if any(key in item for key in ("set", "toggle", "adjust")):
+        return True
+    action = item.get("action")
+    return isinstance(action, Mapping) and "motorAdjust" in action

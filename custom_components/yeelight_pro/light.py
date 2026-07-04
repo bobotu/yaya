@@ -117,7 +117,6 @@ class YeelightProLight(YeelightProEntity, LightEntity):
         device = LightDevice(node, self.coordinator.gateway)
         if flash is not None:
             await async_call_gateway(device.blink(blink_type=_flash_to_blink_type(flash)))
-            await async_call_gateway(self.coordinator.async_refresh_node(node.id))
             return
         await async_call_gateway(
             device.turn_on(
@@ -127,7 +126,6 @@ class YeelightProLight(YeelightProEntity, LightEntity):
                 duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION)),
             )
         )
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         node = self.node
@@ -138,7 +136,6 @@ class YeelightProLight(YeelightProEntity, LightEntity):
                 duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION))
             )
         )
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
 
 def _int_param(node: Any, key: str) -> int | None:

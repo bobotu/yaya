@@ -189,7 +189,6 @@ async def test_relay_switch_service_waits_for_gateway_state(
         await hass.async_block_till_done()
 
         assert gateway.commands[-1].to_payload()["set"] == {"2-sp": False}
-        assert gateway.refreshed_node_ids[-1] == "switch-1"
         assert hass.states.get(switch_entity_id).state == STATE_ON
 
         gateway.update_node_params("switch-1", {"2-sp": False})
@@ -969,7 +968,6 @@ async def test_cover_services_send_standard_commands(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"tp": 66}
-        assert gateway.refreshed_node_ids[-1] == "curtain-1"
 
         await hass.services.async_call(
             "cover",
