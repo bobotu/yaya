@@ -11,7 +11,6 @@ DEFAULT_REQUEST_TIMEOUT = 5.0
 DEFAULT_RECONNECT_DELAY = 5.0
 DEFAULT_HEARTBEAT_WATCHDOG_INTERVAL = timedelta(minutes=11, seconds=30)
 
-CONF_INCLUDE_LIGHT_GROUPS = "include_light_groups"
 CONF_IMPORT_ROOM_IDS = "import_room_ids"
 CONF_SWITCH_MODES = "switch_modes"
 CONF_WIRELESS_SWITCH_NODE_IDS = "wireless_switch_node_ids"

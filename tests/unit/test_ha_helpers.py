@@ -130,25 +130,24 @@ class HomeAssistantHelperTests(unittest.TestCase):
 
         self.assertEqual(switch_mode_for_node(node, {"three-key": "invalid"}), "relay")
 
-    def test_light_groups_are_configurable_and_non_light_groups_are_not_imported(self) -> None:
+    def test_light_groups_are_imported_and_non_light_groups_are_not_imported(self) -> None:
         light_group = TopologyNode.from_mapping({"id": "group-light", "nt": 4, "type": 3})
         scene_group = TopologyNode.from_mapping({"id": "group-scene", "nt": 4, "type": 128})
         subdevice = TopologyNode.from_mapping({"id": "subdevice", "nt": 2, "type": 128})
 
-        self.assertFalse(should_import_node(light_group, include_light_groups=False))
-        self.assertTrue(should_import_node(light_group, include_light_groups=True))
-        self.assertFalse(should_import_node(scene_group, include_light_groups=True))
-        self.assertTrue(should_import_node(subdevice, include_light_groups=False))
+        self.assertTrue(should_import_node(light_group))
+        self.assertFalse(should_import_node(scene_group))
+        self.assertTrue(should_import_node(subdevice))
 
     def test_room_filter_only_imports_selected_explicit_room(self) -> None:
         kitchen = TopologyNode.from_mapping({"id": "kitchen-light", "nt": 2, "type": 3, "roomId": "room-1"})
         bedroom = TopologyNode.from_mapping({"id": "bedroom-light", "nt": 2, "type": 3, "roomId": "room-2"})
         unassigned = TopologyNode.from_mapping({"id": "unassigned-light", "nt": 2, "type": 3})
 
-        self.assertTrue(should_import_node(kitchen, include_light_groups=False, import_room_ids=["room-1"]))
-        self.assertFalse(should_import_node(bedroom, include_light_groups=False, import_room_ids=["room-1"]))
-        self.assertFalse(should_import_node(unassigned, include_light_groups=False, import_room_ids=["room-1"]))
-        self.assertTrue(should_import_node(unassigned, include_light_groups=False, import_room_ids=[]))
+        self.assertTrue(should_import_node(kitchen, import_room_ids=["room-1"]))
+        self.assertFalse(should_import_node(bedroom, import_room_ids=["room-1"]))
+        self.assertFalse(should_import_node(unassigned, import_room_ids=["room-1"]))
+        self.assertTrue(should_import_node(unassigned, import_room_ids=[]))
 
 
 if __name__ == "__main__":

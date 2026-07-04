@@ -14,7 +14,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     CONF_IMPORT_ROOM_IDS,
-    CONF_INCLUDE_LIGHT_GROUPS,
     CONF_SWITCH_MODES,
     DEFAULT_HEARTBEAT_WATCHDOG_INTERVAL,
     DEFAULT_RECONNECT_DELAY,
@@ -60,10 +59,6 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         self.entry = entry
         self.host: str = entry.data[CONF_HOST]
         self.port: int = entry.data.get(CONF_PORT, 65443)
-        self.include_light_groups: bool = entry.options.get(
-            CONF_INCLUDE_LIGHT_GROUPS,
-            entry.data.get(CONF_INCLUDE_LIGHT_GROUPS, False),
-        )
         self.import_room_ids: frozenset[str] = frozenset(
             str(room_id)
             for room_id in entry.options.get(CONF_IMPORT_ROOM_IDS, entry.data.get(CONF_IMPORT_ROOM_IDS, []))
@@ -130,7 +125,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
     async def _async_connect_and_sync(self) -> None:
         await self.gateway.connect()
         await self.gateway.sync(
-            include_groups=self.include_light_groups or bool(self.import_room_ids),
+            include_groups=True,
             include_rooms=bool(self.import_room_ids),
         )
         self._mark_gateway_available("initial sync")
@@ -142,7 +137,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
             if not self.gateway.is_connected:
                 await self.gateway.connect()
             await self.gateway.sync(
-                include_groups=self.include_light_groups or bool(self.import_room_ids),
+                include_groups=True,
                 include_rooms=bool(self.import_room_ids),
             )
         except (OSError, TimeoutError, YeelightProError) as exc:
@@ -189,7 +184,6 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
             for node in self.gateway.state.nodes.values()
             if should_import_node(
                 node,
-                include_light_groups=self.include_light_groups,
                 import_room_ids=self.import_room_ids,
                 room_id=self.gateway.state.room_id_for_node(node),
             )
@@ -327,7 +321,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         self._last_snapshot = snapshot
         _LOGGER.debug(
             "Yeelight Pro gateway %s:%s state snapshot after %s; nodes=%d imported=%d rooms=%d groups=%d "
-            "unknown_property_nodes=%d full_sync_source=%s room_filter=%s include_light_groups=%s",
+            "unknown_property_nodes=%d full_sync_source=%s room_filter=%s",
             self.host,
             self.port,
             reason,
@@ -338,7 +332,6 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
             snapshot[4],
             snapshot[6],
             sorted(self.import_room_ids),
-            self.include_light_groups,
         )
         if unknown_summary["count"]:
             _LOGGER.debug(

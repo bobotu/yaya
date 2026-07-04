@@ -15,7 +15,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.yeelight_pro.config_flow import CannotConnect, GatewayOptions
 from custom_components.yeelight_pro.const import (
     CONF_IMPORT_ROOM_IDS,
-    CONF_INCLUDE_LIGHT_GROUPS,
     CONF_SWITCH_MODES,
     CONF_WIRELESS_SWITCH_NODE_IDS,
     DOMAIN,
@@ -54,7 +53,6 @@ async def test_config_flow_creates_entry(hass: HomeAssistant) -> None:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             {
-                CONF_INCLUDE_LIGHT_GROUPS: True,
                 CONF_IMPORT_ROOM_IDS: ["room-1"],
                 CONF_WIRELESS_SWITCH_NODE_IDS: ["switch-1"],
             },
@@ -64,7 +62,6 @@ async def test_config_flow_creates_entry(hass: HomeAssistant) -> None:
     assert result["title"] == "192.0.2.10"
     assert result["data"] == {CONF_HOST: "192.0.2.10", CONF_PORT: 65443}
     assert result["options"] == {
-        CONF_INCLUDE_LIGHT_GROUPS: True,
         CONF_IMPORT_ROOM_IDS: ["room-1"],
         CONF_SWITCH_MODES: {
             "switch-1": SWITCH_MODE_WIRELESS,
@@ -126,7 +123,6 @@ async def test_options_flow_updates_switch_modes(hass: HomeAssistant) -> None:
         domain=DOMAIN,
         data={CONF_HOST: "192.0.2.10", CONF_PORT: 65443},
         options={
-            CONF_INCLUDE_LIGHT_GROUPS: False,
             CONF_IMPORT_ROOM_IDS: ["room-1"],
             CONF_SWITCH_MODES: {
                 "switch-1": SWITCH_MODE_WIRELESS,
@@ -162,7 +158,6 @@ async def test_options_flow_updates_switch_modes(hass: HomeAssistant) -> None:
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             {
-                CONF_INCLUDE_LIGHT_GROUPS: True,
                 CONF_IMPORT_ROOM_IDS: ["room-2"],
                 CONF_WIRELESS_SWITCH_NODE_IDS: ["double-switch-1"],
             },
@@ -170,7 +165,6 @@ async def test_options_flow_updates_switch_modes(hass: HomeAssistant) -> None:
 
     assert result["type"] is data_entry_flow.FlowResultType.CREATE_ENTRY
     assert result["data"] == {
-        CONF_INCLUDE_LIGHT_GROUPS: True,
         CONF_IMPORT_ROOM_IDS: ["room-2"],
         CONF_SWITCH_MODES: {
             "switch-1": SWITCH_MODE_RELAY,

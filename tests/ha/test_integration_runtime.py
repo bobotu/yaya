@@ -31,7 +31,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.yeelight_pro.const import (
     CONF_IMPORT_ROOM_IDS,
-    CONF_INCLUDE_LIGHT_GROUPS,
     CONF_SWITCH_MODES,
     DOMAIN,
     EVENT_YEELIGHT_PRO,
@@ -457,12 +456,12 @@ async def test_knob_event_bus_payload_and_device_triggers(
         await hass.async_block_till_done()
 
 
-async def test_include_light_groups_option_imports_group_light(
+async def test_light_groups_are_imported_by_default(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
     gateway = FakeGateway(topology_fixture)
-    entry = await _setup_entry(hass, gateway, include_light_groups=True)
+    entry = await _setup_entry(hass, gateway)
 
     try:
         group_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_group-node-1_light")
@@ -995,7 +994,6 @@ async def _setup_entry(
     hass: HomeAssistant,
     gateway: FakeGateway,
     *,
-    include_light_groups: bool = False,
     import_room_ids: list[str] | None = None,
     switch_modes: dict[str, str] | None = None,
     before_setup: Callable[[MockConfigEntry], None] | None = None,
@@ -1004,7 +1002,6 @@ async def _setup_entry(
         domain=DOMAIN,
         data={CONF_HOST: "127.0.0.1", CONF_PORT: 65443},
         options={
-            CONF_INCLUDE_LIGHT_GROUPS: include_light_groups,
             CONF_IMPORT_ROOM_IDS: import_room_ids or [],
             CONF_SWITCH_MODES: switch_modes or {},
         },
