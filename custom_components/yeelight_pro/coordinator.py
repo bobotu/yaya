@@ -348,10 +348,6 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
                 unknown_summary["by_shape"],
             )
 
-    async def async_refresh_node(self, node_id: str | int) -> None:
-        await self.gateway.refresh_node(node_id)
-        self.async_set_updated_data(self._current_data())
-
     def gateway_identifier(self) -> tuple[str, str]:
         return (DOMAIN, self.gateway_id)
 

@@ -80,28 +80,24 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
         if node is None:
             return
         await async_call_gateway(CurtainDevice(node, self.coordinator.gateway).open())
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         node = self.node
         if node is None:
             return
         await async_call_gateway(CurtainDevice(node, self.coordinator.gateway).close())
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         node = self.node
         if node is None:
             return
         await async_call_gateway(CurtainDevice(node, self.coordinator.gateway).stop())
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         node = self.node
         if node is None:
             return
         await async_call_gateway(CurtainDevice(node, self.coordinator.gateway).set_position(kwargs[ATTR_POSITION]))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_open_cover_tilt(self, **kwargs: Any) -> None:
         await self._async_set_tilt_angle(180)
@@ -114,7 +110,6 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
         if node is None:
             return
         await async_call_gateway(DreamCurtainDevice(node, self.coordinator.gateway).stop_tilt())
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_set_cover_tilt_position(self, **kwargs: Any) -> None:
         await self._async_set_tilt_angle(_tilt_to_angle(kwargs[ATTR_TILT_POSITION]))
@@ -124,7 +119,6 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
         if node is None:
             return
         await async_call_gateway(DreamCurtainDevice(node, self.coordinator.gateway).set_angle(angle))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
 
 def _has_tilt(node: Any) -> bool:

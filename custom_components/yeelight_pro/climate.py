@@ -109,14 +109,12 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
         if node is None:
             return
         await async_call_gateway(AirConditionDevice(node, self.coordinator.gateway).set_power(True, index=self._index))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_turn_off(self) -> None:
         node = self.node
         if node is None:
             return
         await async_call_gateway(AirConditionDevice(node, self.coordinator.gateway).set_power(False, index=self._index))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         node = self.node
@@ -131,7 +129,6 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
             if mode is not None:
                 props[self._key("acm")] = mode
             await async_call_gateway(self.coordinator.gateway.set_node_props(node.id, props, nt=node.nt))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         node = self.node
@@ -143,7 +140,6 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
                 int(temperature), index=self._index
             )
         )
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         node = self.node
@@ -155,7 +151,6 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
         await async_call_gateway(
             AirConditionDevice(node, self.coordinator.gateway).set_fan_speed(speed, index=self._index)
         )
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     def _key(self, suffix: str) -> str:
         return f"{self._index}-{suffix}"
@@ -194,14 +189,12 @@ class YeelightProBathHeaterClimate(YeelightProEntity, ClimateEntity):
         if node is None:
             return
         await async_call_gateway(BathHeaterDevice(node, self.coordinator.gateway).set_power(True))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_turn_off(self) -> None:
         node = self.node
         if node is None:
             return
         await async_call_gateway(BathHeaterDevice(node, self.coordinator.gateway).set_power(False))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if hvac_mode == HVACMode.OFF:
@@ -217,7 +210,6 @@ class YeelightProBathHeaterClimate(YeelightProEntity, ClimateEntity):
         await async_call_gateway(
             BathHeaterDevice(node, self.coordinator.gateway).set_target_temperature(int(temperature))
         )
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
 
 def _air_condition_indexes(node: Any) -> tuple[int, ...]:

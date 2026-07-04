@@ -67,4 +67,3 @@ class YeelightProBathModeSelect(YeelightProEntity, SelectEntity):
         await async_call_gateway(
             self.coordinator.gateway.set_node_props(node.id, {"bhm": BATH_MODE_OPTIONS[option]}, nt=node.nt)
         )
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))

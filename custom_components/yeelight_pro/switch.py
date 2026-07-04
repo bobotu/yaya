@@ -105,7 +105,6 @@ class YeelightProRelaySwitch(YeelightProEntity, SwitchEntity):
             await async_call_gateway(
                 MultiSwitchDevice(node, self.coordinator.gateway).set_channel(self._channel, is_on)
             )
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
 
 class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
@@ -145,7 +144,6 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
         if node is None:
             return
         await async_call_gateway(self.coordinator.gateway.set_node_props(node.id, {self._prop: value}, nt=node.nt))
-        await async_call_gateway(self.coordinator.async_refresh_node(node.id))
 
 
 def _indexed_props(node: Any, suffix: str) -> tuple[str, ...]:
