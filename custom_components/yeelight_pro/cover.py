@@ -54,11 +54,7 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
 
     @property
     def supported_features(self) -> CoverEntityFeature:
-        features = (
-            CoverEntityFeature.OPEN
-            | CoverEntityFeature.CLOSE
-            | CoverEntityFeature.STOP
-        )
+        features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
         node = self.node
         if node is None or curtain_position_known(node):
             features |= CoverEntityFeature.SET_POSITION

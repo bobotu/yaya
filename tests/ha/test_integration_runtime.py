@@ -142,6 +142,9 @@ class FakeGateway:
     def optimistic_diagnostics(self) -> dict[str, Any]:
         return self._overlay.diagnostics(now=asyncio.get_running_loop().time())
 
+    def motor_tracking_diagnostics(self) -> dict[str, Any]:
+        return {"count": 0, "entries": []}
+
     def add_event_listener(self, listener: Any) -> Any:
         self._event_listeners.append(listener)
 

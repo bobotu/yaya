@@ -301,9 +301,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 message={"method": "gateway_sync.topology"},
             )
         )
-        await state_ref.ask(
-            ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 80),))
-        )
+        await state_ref.ask(ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 80),)))
         visible = state.visible_node("curtain-1")
         self.assertEqual(visible.params["cp"], 20)
         self.assertEqual(visible.params[MOTOR_TRACKING_TARGET_POSITION], 80)
@@ -327,15 +325,11 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
 
-        await state_ref.ask(
-            ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),))
-        )
+        await state_ref.ask(ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),)))
         await state_ref.ask(ApplyMotorStopCommand(("curtain-1",)))
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
 
-        await state_ref.ask(
-            ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),))
-        )
+        await state_ref.ask(ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),)))
         await state_ref.tell(
             SessionStatusChanged(
                 previous=GatewaySessionState.READY,
@@ -346,9 +340,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
 
-        await state_ref.ask(
-            ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),))
-        )
+        await state_ref.ask(ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),)))
         await asyncio.sleep(0.05)
         self.assertEqual(refreshes, ["curtain-1"])
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
