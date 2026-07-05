@@ -32,6 +32,7 @@ ATTR_SPIN_MODE = "spin_mode"
 
 PLATFORMS = [
     Platform.LIGHT,
+    Platform.BUTTON,
     Platform.COVER,
     Platform.SWITCH,
     Platform.CLIMATE,

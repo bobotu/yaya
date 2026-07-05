@@ -51,6 +51,11 @@
     }
   },
   "entity": {
+    "button": {
+      "identify": {
+        "name": "识别"
+      }
+    },
     "climate": {
       "air_conditioner": {
         "name": "空调 {index}"
