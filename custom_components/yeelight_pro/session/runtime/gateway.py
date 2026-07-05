@@ -109,6 +109,9 @@ class YeelightProRuntime:
         await self.session_ref.ask(DisableAutoSyncCommand())
         await self.session_ref.ask(ConnectSessionCommand())
 
+    async def reconnect(self) -> None:
+        await self.session_ref.ask(ConnectSessionCommand())
+
     async def close(self) -> None:
         await self.session_ref.ask(DisableAutoSyncCommand())
         await self.session_ref.ask(SetSessionStateCommand(GatewaySessionState.CLOSING))
