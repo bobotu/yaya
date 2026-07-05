@@ -20,6 +20,8 @@ from .helpers import (
 )
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 1
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -98,9 +100,7 @@ class YeelightProRelaySwitch(YeelightProEntity, SwitchEntity):
         await self._async_set_channel(False)
 
     async def _async_set_channel(self, is_on: bool) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {relay_prop_name(node, self._channel): is_on})
 
 
@@ -141,9 +141,7 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
         await self._async_set_value(False)
 
     async def _async_set_value(self, value: bool) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {self._prop: value})
 
 

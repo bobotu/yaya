@@ -16,6 +16,8 @@ from .entity import YeelightProEntity, async_set_node_props
 from .helpers import device_type
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 1
+
 
 @dataclass(frozen=True, kw_only=True)
 class YeelightProNumberDescription(NumberEntityDescription):
@@ -112,9 +114,7 @@ class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
         return self.entity_description.value_fn(node)
 
     async def async_set_native_value(self, value: float) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {self.entity_description.key: round(value)})
 
 

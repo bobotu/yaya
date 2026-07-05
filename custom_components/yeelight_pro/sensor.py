@@ -16,6 +16,8 @@ from .core import is_knob_capable
 from .entity import YeelightProEntity
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,

@@ -155,6 +155,9 @@
     },
     "invalid_gateway_command": {
       "message": "Yeelight Pro 命令无效：{error}"
+    },
+    "node_unavailable": {
+      "message": "目标 Yeelight Pro 设备 {node_id} 当前不可用。"
     }
   },
   "device_automation": {

@@ -13,6 +13,8 @@ from .entity import YeelightProEntity
 from .helpers import button_count, event_data, event_types_for_node, is_programmable_node
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,

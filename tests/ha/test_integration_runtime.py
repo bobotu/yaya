@@ -22,7 +22,7 @@ from homeassistant.components.light import (
     ATTR_TRANSITION,
     FLASH_SHORT,
 )
-from homeassistant.const import ATTR_ENTITY_ID, CONF_HOST, CONF_PORT, STATE_OFF, STATE_ON
+from homeassistant.const import ATTR_ENTITY_ID, CONF_HOST, CONF_PORT, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -37,6 +37,7 @@ from custom_components.yeelight_pro.const import (
     SWITCH_MODE_WIRELESS,
 )
 from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand
+from custom_components.yeelight_pro.entity import YeelightProNodeUnavailableError
 from custom_components.yeelight_pro.helpers import node_unique_id
 from custom_components.yeelight_pro.session import (
     GatewaySessionState,
@@ -725,6 +726,39 @@ async def test_light_service_maps_transition_and_flash(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["action"] == {"blink": {"repeat": 4, "type": "urgent"}}
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_light_service_raises_when_target_node_is_offline(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        updated_fixture = deepcopy(topology_fixture)
+        light_node = next(node for node in updated_fixture["nodes"] if node["id"] == "light-1")
+        light_node["o"] = False
+
+        gateway.replace_topology(updated_fixture)
+        await hass.async_block_till_done()
+
+        assert hass.states.get(light_entity_id).state == STATE_UNAVAILABLE
+        command_count = len(gateway.commands)
+        with pytest.raises(YeelightProNodeUnavailableError) as err:
+            await hass.services.async_call(
+                "light",
+                "turn_on",
+                {ATTR_ENTITY_ID: light_entity_id},
+                blocking=True,
+            )
+
+        assert err.value.translation_key == "node_unavailable"
+        assert len(gateway.commands) == command_count
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

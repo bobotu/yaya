@@ -67,6 +67,9 @@ class YeelightProEntity(CoordinatorEntity[YeelightProCoordinator]):
     def optimistic_properties(self) -> Iterable[str] | None:
         return ()
 
+    def require_current_node(self) -> TopologyNode:
+        return require_node_for_action(self.node, self._node_id)
+
 
 def base_entity_name(node: TopologyNode) -> str:
     return node.name or f"Yeelight Pro {node.id}"
@@ -83,6 +86,10 @@ class YeelightProGatewayUnavailableError(YeelightProActionError):
     """The gateway connection is not currently available."""
 
 
+class YeelightProNodeUnavailableError(YeelightProActionError):
+    """The target node is not currently available."""
+
+
 class YeelightProGatewayTimeoutError(YeelightProActionError):
     """The gateway did not answer an RPC request before timeout."""
 
@@ -97,6 +104,16 @@ class YeelightProUnknownActionError(YeelightProActionError):
 
 class YeelightProInvalidCommandError(ServiceValidationError):
     """The requested command is invalid for the target device."""
+
+
+def require_node_for_action(node: TopologyNode | None, node_id: str | int) -> TopologyNode:
+    if node is not None and node.online is not False:
+        return node
+    raise YeelightProNodeUnavailableError(
+        translation_domain=DOMAIN,
+        translation_key="node_unavailable",
+        translation_placeholders={"node_id": str(node_id)},
+    )
 
 
 async def async_call_gateway(action: Awaitable[_T]) -> _T:

@@ -15,6 +15,8 @@ from .entity import YeelightProEntity
 from .helpers import device_type, relay_channel_numbers, relay_prop_name
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,

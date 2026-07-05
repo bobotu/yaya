@@ -155,6 +155,9 @@
     },
     "invalid_gateway_command": {
       "message": "The Yeelight Pro command is invalid: {error}"
+    },
+    "node_unavailable": {
+      "message": "The target Yeelight Pro device {node_id} is not available."
     }
   },
   "device_automation": {
