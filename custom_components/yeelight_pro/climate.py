@@ -57,7 +57,11 @@ async def async_setup_entry(
 def _climate_entities_for_node(coordinator: YeelightProCoordinator, node: Any) -> list[YeelightProEntity]:
     item = device_type(node)
     if item in {DeviceType.AIR_CONDITION, DeviceType.AIR_CONDITION_VRF}:
-        return [YeelightProAirConditionClimate(coordinator, node, index) for index in _air_condition_indexes(node)]
+        indexes = _air_condition_indexes(node)
+        return [
+            YeelightProAirConditionClimate(coordinator, node, index, primary_entity=len(indexes) == 1)
+            for index in indexes
+        ]
     if item == DeviceType.BATH_HEATER:
         return [YeelightProBathHeaterClimate(coordinator, node)]
     return []
@@ -77,11 +81,21 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
     _attr_target_temperature_step = 1
     _attr_fan_modes = list(HA_FAN_TO_AC)
 
-    def __init__(self, coordinator: YeelightProCoordinator, node: Any, index: int) -> None:
+    def __init__(
+        self,
+        coordinator: YeelightProCoordinator,
+        node: Any,
+        index: int,
+        *,
+        primary_entity: bool = False,
+    ) -> None:
         super().__init__(coordinator, node, f"air_conditioner_{index}")
         self._index = index
-        self._attr_translation_key = "air_conditioner"
-        self._attr_translation_placeholders = {"index": str(index)}
+        if primary_entity:
+            self._attr_name = None
+        else:
+            self._attr_translation_key = "air_conditioner"
+            self._attr_translation_placeholders = {"index": str(index)}
 
     @property
     def current_temperature(self) -> float | None:
