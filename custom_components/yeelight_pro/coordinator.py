@@ -129,7 +129,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
     async def _async_update_data(self) -> dict[str, TopologyNode]:
         try:
             if not self.gateway.is_connected:
-                await self.gateway.connect()
+                await self.gateway.reconnect()
             await self.gateway.sync(
                 include_groups=True,
                 include_rooms=bool(self.import_room_ids),

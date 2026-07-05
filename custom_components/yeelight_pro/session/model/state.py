@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,21 +36,25 @@ class GatewayState:
 
     def __init__(self) -> None:
         self.nodes: dict[str | int, TopologyNode] = {}
+        self.topology_node_ids: set[str | int] = set()
         self.groups: dict[str | int, Mapping[str, Any]] = {}
         self.rooms: dict[str | int, Mapping[str, Any]] = {}
         self.scenes: dict[str | int, Mapping[str, Any]] = {}
         self.unknown_property_nodes: dict[str | int, UnknownPropertyNode] = {}
 
-    def apply_topology(self, message: Mapping[str, Any]) -> Topology:
+    def apply_topology(self, message: Mapping[str, Any], *, replace: bool = True) -> Topology:
         topology = Topology.from_message(message)
-        nodes = {}
+        nodes = {} if replace else dict(self.nodes)
+        present_node_ids: set[str | int] = set()
         for node in topology.nodes:
+            present_node_ids.add(node.id)
             current = self.nodes.get(node.id)
             if current is not None:
                 params = dict(current.params)
                 params.update(node.params)
-                online = node.online if node.online is not None else current.online
-                node = replace(node, params=params, online=online)
+                current_online = current.online if node.id in self.topology_node_ids else None
+                online = node.online if node.online is not None else current_online
+                node = dataclass_replace(node, params=params, online=online)
             unknown = self.unknown_property_nodes.pop(node.id, None)
             if unknown is not None:
                 node = node.merge_update(
@@ -61,10 +66,22 @@ class GatewayState:
                     }
                 )
             nodes[node.id] = node
+        if replace:
+            for node_id, current in self.nodes.items():
+                if node_id not in nodes:
+                    nodes[node_id] = dataclass_replace(current, online=False)
+            self.topology_node_ids = present_node_ids
+        else:
+            self.topology_node_ids.update(present_node_ids)
         self.nodes = nodes
-        self.groups = _items_by_id(topology.groups)
-        self.rooms = _items_by_id(topology.rooms)
-        self.scenes = _items_by_id(topology.scenes)
+        if replace:
+            self.groups = _items_by_id(topology.groups)
+            self.rooms = _items_by_id(topology.rooms)
+            self.scenes = _items_by_id(topology.scenes)
+        else:
+            self.groups.update(_items_by_id(topology.groups))
+            self.rooms.update(_items_by_id(topology.rooms))
+            self.scenes.update(_items_by_id(topology.scenes))
         return topology
 
     def apply_groups(self, message: Mapping[str, Any]) -> None:
@@ -79,7 +96,7 @@ class GatewayState:
     def apply_message(self, message: Mapping[str, Any]) -> None:
         method = message.get("method")
         if method == GatewayMethod.POST_TOPOLOGY:
-            self.apply_topology(message)
+            self.apply_topology(message, replace=False)
         elif method == GatewayMethod.POST_PROP:
             self.apply_properties(message)
 
@@ -102,8 +119,8 @@ class GatewayState:
         items_by_id = {
             node_id: item for item in list_payload(message, "nodes") if (node_id := _item_id(item)) is not None
         }
-        return bool(self.nodes) and all(
-            node_id in items_by_id and items_by_id[node_id].get("o") is True for node_id in self.nodes
+        return bool(self.topology_node_ids) and all(
+            node_id in items_by_id and items_by_id[node_id].get("o") is True for node_id in self.topology_node_ids
         )
 
     def unknown_summary(self) -> dict[str, Any]:

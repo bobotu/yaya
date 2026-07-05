@@ -19,7 +19,11 @@ from yeelight_pro.session import (
     GatewaySessionState,  # noqa: E402
     YeelightProGateway,  # noqa: E402
 )
-from yeelight_pro.session.messages import RpcPushEvent, SetSessionStateCommand  # noqa: E402
+from yeelight_pro.session.messages import (  # noqa: E402
+    FullPropertySyncTimedOutEvent,
+    RpcPushEvent,
+    SetSessionStateCommand,
+)
 from yeelight_pro.session.model import MOTOR_TRACKING_TARGET_POSITION  # noqa: E402
 
 
@@ -432,7 +436,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.visible_node("light-1").params["p"], False)
         self.assertFalse(gateway.has_pending_overlay("light-1", ["p"]))
 
-    async def test_topology_push_removes_missing_node_overlay(self) -> None:
+    async def test_topology_push_keeps_missing_node_overlay(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
                 request = parse_line(await reader.readline())
@@ -463,11 +467,11 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await gateway.set_node_props("light-1", {"p": True}, optimistic_props={"p": True})
             self.assertTrue(gateway.has_pending_overlay("light-1", ["p"]))
             await asyncio.sleep(0.1)
+            self.assertIn("light-1", gateway.state.nodes)
+            self.assertTrue(gateway.has_pending_overlay("light-1", ["p"]))
+            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
         finally:
             await gateway.close()
-
-        self.assertNotIn("light-1", gateway.state.nodes)
-        self.assertFalse(gateway.has_pending_overlay("light-1", ["p"]))
 
     async def test_connection_loss_clears_pending_overlay(self) -> None:
         gateway = YeelightProGateway("127.0.0.1", port=1)
@@ -646,6 +650,94 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
         self.assertEqual(gateway.last_full_sync_source, "poll")
 
+    async def test_topology_push_full_property_wait_falls_back_to_poll(self) -> None:
+        received: list[dict[str, Any]] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                writer.write(
+                    b'{"method":"gateway_post.topology",'
+                    b'"nodes":[{"id":"light-1","nt":2,"type":3,"name":"Light"}],'
+                    b'"groups":[],"rooms":[],"scenes":[]}\r\n'
+                )
+                await writer.drain()
+
+                poll_request = parse_line(await reader.readuntil(b"\r\n"))
+                received.append(poll_request)
+                writer.write(
+                    json.dumps(
+                        {
+                            "id": poll_request["id"],
+                            "nodes": [{"id": "light-1", "nt": 2, "params": {"p": True}}],
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\r\n"
+                )
+                await writer.drain()
+                await asyncio.sleep(0.05)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(host, port=port)
+        gateway.full_prop_timeout = 0.01
+
+        try:
+            await gateway.connect()
+            await asyncio.wait_for(gateway._runtime.session.wait_ready(), timeout=0.5)
+        finally:
+            await gateway.close()
+
+        self.assertEqual([request["method"] for request in received], ["gateway_get.node"])
+        self.assertEqual(received[0]["params"], {"id": 0})
+        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
+        self.assertEqual(gateway.last_full_sync_source, "poll")
+
+    async def test_repeated_topology_push_replaces_active_full_property_wait_options(self) -> None:
+        gateway = YeelightProGateway("127.0.0.1", port=1)
+        gateway.full_prop_timeout = 10.0
+
+        try:
+            await gateway._runtime.session_ref.ask(
+                RpcPushEvent(
+                    epoch=0,
+                    message={
+                        "method": "gateway_post.topology",
+                        "nodes": [{"id": "first-light", "nt": 2, "type": 3, "name": "First"}],
+                        "groups": [],
+                        "rooms": [],
+                        "scenes": [],
+                    },
+                )
+            )
+            first_sync_id = gateway._runtime.session._sync_id
+
+            await gateway._runtime.session_ref.ask(
+                RpcPushEvent(
+                    epoch=0,
+                    message={
+                        "method": "gateway_post.topology",
+                        "nodes": [{"id": "second-light", "nt": 2, "type": 3, "name": "Second"}],
+                        "groups": [],
+                        "rooms": [],
+                        "scenes": [],
+                    },
+                )
+            )
+            active_sync_id = gateway._runtime.session._sync_id
+            self.assertGreater(active_sync_id, first_sync_id)
+            self.assertEqual(set(gateway._runtime.session._sync_options_by_id), {active_sync_id})
+
+            await gateway._runtime.session_ref.ask(FullPropertySyncTimedOutEvent(sync_id=first_sync_id))
+            self.assertEqual(gateway.session_state, GatewaySessionState.WAITING_FULL_PROP)
+            self.assertEqual(gateway._runtime.session._sync_id, active_sync_id)
+            self.assertEqual(set(gateway._runtime.session._sync_options_by_id), {active_sync_id})
+            self.assertIsNone(gateway.last_full_sync_source)
+        finally:
+            await gateway.close()
+
     async def test_concurrent_sync_requests_join_current_sync(self) -> None:
         received: list[dict[str, Any]] = []
 
@@ -788,6 +880,87 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
         self.assertEqual(gateway.session_state, "disconnected")
         self.assertIn("ready", [getattr(status, "current", None) for status in statuses])
+
+    async def test_refresh_reconnect_preserves_background_auto_sync(self) -> None:
+        requests_by_connection: list[list[str]] = []
+        third_auto_sync = asyncio.Event()
+        attempts = 0
+
+        async def handle_sync(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+            *,
+            close_after_sync: bool,
+            power: bool,
+        ) -> None:
+            request = parse_line(await reader.readuntil(b"\r\n"))
+            requests_by_connection[-1].append(request["method"])
+            writer.write(
+                json.dumps(
+                    {
+                        "id": request["id"],
+                        "nodes": [{"id": "light-1", "nt": 2, "type": 3, "name": "Light"}],
+                        "groups": [],
+                        "rooms": [],
+                        "scenes": [],
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\r\n"
+            )
+            writer.write(
+                json.dumps(
+                    {
+                        "method": "gateway_post.prop",
+                        "nodes": [{"id": "light-1", "nt": 2, "params": {"p": power}, "o": True}],
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\r\n"
+            )
+            await writer.drain()
+            if close_after_sync:
+                await asyncio.sleep(0.1)
+                writer.close()
+                await writer.wait_closed()
+                return
+            third_auto_sync.set()
+            await reader.readline()
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            nonlocal attempts
+            attempts += 1
+            requests_by_connection.append([])
+            try:
+                await handle_sync(
+                    reader,
+                    writer,
+                    close_after_sync=attempts < 3,
+                    power=attempts % 2 == 1,
+                )
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(host, port=port, reconnect_delay=1.0)
+
+        try:
+            await gateway.start()
+            await asyncio.wait_for(gateway.wait_closed(), timeout=0.5)
+
+            await gateway.reconnect()
+            await gateway.sync()
+            await asyncio.wait_for(gateway.wait_closed(), timeout=0.5)
+
+            await asyncio.wait_for(third_auto_sync.wait(), timeout=2.0)
+        finally:
+            await gateway.close()
+
+        self.assertGreaterEqual(attempts, 3)
+        self.assertEqual(requests_by_connection[0], ["gateway_get.topology"])
+        self.assertEqual(requests_by_connection[1], ["gateway_get.topology"])
+        self.assertEqual(requests_by_connection[2], ["gateway_get.topology"])
 
     async def test_concurrent_requests_are_serialized_and_matched_by_id(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

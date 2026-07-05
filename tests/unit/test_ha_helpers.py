@@ -13,6 +13,7 @@ INTEGRATION = CUSTOM_COMPONENTS / "yeelight_pro"
 
 
 class _Platform(StrEnum):
+    BUTTON = "button"
     CLIMATE = "climate"
     LIGHT = "light"
     COVER = "cover"

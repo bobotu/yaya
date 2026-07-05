@@ -207,13 +207,10 @@ class SessionActor(Actor[SessionActorMessage]):
     async def _begin_sync(self, message: SyncSessionCommand) -> asyncio.Future[None]:
         if self._sync_waiter is not None and not self._sync_waiter.done():
             return self._sync_waiter
-        self._sync_id += 1
-        sync_id = self._sync_id
         self._cancel_sync_timeout()
         self._clear_ready()
         self._sync_waiter = asyncio.get_running_loop().create_future()
         options = _SyncOptions.from_message(message)
-        self._sync_options_by_id[sync_id] = options
         self.last_full_sync_source = None
         try:
             await self.device_state_ref.tell(SyncStartedEvent(reason=StateChangeReason.MANUAL_SYNC))
@@ -226,17 +223,27 @@ class SessionActor(Actor[SessionActorMessage]):
                     message={"method": SyntheticSessionMethod.SYNC_TOPOLOGY},
                 )
             )
-            await self._set_session_state(GatewaySessionState.WAITING_FULL_PROP)
-            self._sync_timeout_task = self.defer_later(
-                self.full_prop_timeout,
-                options.to_timeout(sync_id),
-                name="yeelight-pro-full-property-timeout",
-            )
+            await self._begin_full_property_wait(options)
         except Exception as exc:
             self._fail_sync(exc, notify_waiter=False)
             self._fail_ready(exc)
             raise
         return self._sync_waiter
+
+    async def _begin_full_property_wait(self, options: _SyncOptions) -> None:
+        self._sync_id += 1
+        sync_id = self._sync_id
+        self._cancel_sync_timeout()
+        self._clear_ready()
+        self._sync_options_by_id.clear()
+        self._sync_options_by_id[sync_id] = options
+        self.last_full_sync_source = None
+        await self._set_session_state(GatewaySessionState.WAITING_FULL_PROP)
+        self._sync_timeout_task = self.defer_later(
+            self.full_prop_timeout,
+            options.to_timeout(sync_id),
+            name="yeelight-pro-full-property-timeout",
+        )
 
     async def _handle_full_property_timeout(self, message: FullPropertySyncTimedOutEvent) -> None:
         if message.sync_id != self._sync_id or self.session_state != GatewaySessionState.WAITING_FULL_PROP:
@@ -327,7 +334,7 @@ class SessionActor(Actor[SessionActorMessage]):
             await self.device_state_ref.ask(
                 ApplyGenericStateMessageCommand(payload=message, reason=StateChangeReason.TOPOLOGY_PUSH)
             )
-            await self._set_session_state(GatewaySessionState.WAITING_FULL_PROP)
+            await self._begin_full_property_wait(self._sync_options_by_id.get(self._sync_id, self._sync_options))
         else:
             await self.device_state_ref.ask(
                 ApplyGenericStateMessageCommand(payload=message, reason=StateChangeReason.GENERIC_PUSH)
