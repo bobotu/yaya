@@ -38,6 +38,7 @@ from custom_components.yeelight_pro.const import (
     SWITCH_MODE_WIRELESS,
 )
 from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand
+from custom_components.yeelight_pro.entity import YeelightProGatewayUnavailableError
 from custom_components.yeelight_pro.helpers import node_unique_id
 from custom_components.yeelight_pro.session import (
     GatewaySessionState,
@@ -656,6 +657,33 @@ async def test_identify_button_press_sends_light_blink_command(
             "action": {"blink": {"repeat": 4, "type": "notify"}},
         }
         assert not gateway.has_pending_overlay("group-node-1")
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_identify_button_press_fails_when_current_node_is_missing(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.yeelight_pro.button import YeelightProIdentifyButton
+
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        coordinator = entry.runtime_data
+        node = coordinator.node("light-1")
+        assert node is not None
+        button = YeelightProIdentifyButton(coordinator, node)
+        monkeypatch.setattr(coordinator, "node", lambda node_id: None)
+
+        with pytest.raises(YeelightProGatewayUnavailableError) as err:
+            await button.async_press()
+
+        assert err.value.translation_key == "gateway_unavailable"
+        assert gateway.commands == []
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

@@ -7,11 +7,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import DOMAIN
 from .coordinator import YeelightProCoordinator
 from .core.devices import LightDevice
-from .entity import YeelightProEntity, async_call_gateway
+from .entity import YeelightProEntity, YeelightProGatewayUnavailableError, async_call_gateway
 from .helpers import light_device_type
 from .platform import async_add_dynamic_entities
+
+PARALLEL_UPDATES = 1
 
 
 async def async_setup_entry(
@@ -39,6 +42,9 @@ class YeelightProIdentifyButton(YeelightProEntity, ButtonEntity):
     async def async_press(self) -> None:
         node = self.node
         if node is None:
-            return
+            raise YeelightProGatewayUnavailableError(
+                translation_domain=DOMAIN,
+                translation_key="gateway_unavailable",
+            )
         device = LightDevice(node, self.coordinator.gateway)
         await async_call_gateway(device.blink())
