@@ -38,7 +38,7 @@ from custom_components.yeelight_pro.const import (
     SWITCH_MODE_WIRELESS,
 )
 from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand
-from custom_components.yeelight_pro.entity import YeelightProGatewayUnavailableError, YeelightProNodeUnavailableError
+from custom_components.yeelight_pro.entity import YeelightProNodeUnavailableError
 from custom_components.yeelight_pro.helpers import node_unique_id
 from custom_components.yeelight_pro.light import YeelightProLight
 from custom_components.yeelight_pro.session import (
@@ -691,10 +691,10 @@ async def test_identify_button_press_fails_when_current_node_is_missing(
         button = YeelightProIdentifyButton(coordinator, node)
         monkeypatch.setattr(coordinator, "node", lambda node_id: None)
 
-        with pytest.raises(YeelightProGatewayUnavailableError) as err:
+        with pytest.raises(YeelightProNodeUnavailableError) as err:
             await button.async_press()
 
-        assert err.value.translation_key == "gateway_unavailable"
+        assert err.value.translation_key == "node_unavailable"
         assert gateway.commands == []
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
