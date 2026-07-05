@@ -14,6 +14,8 @@ from ..messages import (
     AppliedPropertiesResult,
     ApplyGenericStateMessageCommand,
     ApplyGroupsCommand,
+    ApplyMotorStopCommand,
+    ApplyMotorTargetsCommand,
     ApplyOptimisticPropsCommand,
     ApplyPropertiesCommand,
     ApplyRoomsCommand,
@@ -21,6 +23,7 @@ from ..messages import (
     ApplyTopologyCommand,
     AuthoritativeStateChangedEvent,
     DeviceStateActorMessage,
+    ExpireMotorTrackingCommand,
     ExpireOptimisticStateCommand,
     RefreshNodeRequestedEvent,
     SessionStatusChanged,
@@ -30,6 +33,7 @@ from ..messages import (
     SyncStartedEvent,
     SyntheticSessionMethod,
 )
+from ..model.motor import MOTOR_TRACKING_TTL, MotorStateTracker
 from ..model.optimistic import OPTIMISTIC_STATE_TTL, OptimisticStateOverlay
 from ..model.state import GatewayState
 from ..model.status import GatewaySessionState
@@ -44,12 +48,14 @@ RefreshRequester = Callable[[RefreshNodeRequestedEvent], Awaitable[None] | None]
 class DeviceStateActor(Actor[DeviceStateActorMessage]):
     """Owns authoritative gateway state plus short-lived visible-state overlay."""
 
-    def __init__(self, *, ttl: float = OPTIMISTIC_STATE_TTL) -> None:
+    def __init__(self, *, ttl: float = OPTIMISTIC_STATE_TTL, motor_tracking_ttl: float = MOTOR_TRACKING_TTL) -> None:
         super().__init__("yeelight-pro-device-state")
         self.state = GatewayState()
         self.overlay = OptimisticStateOverlay(ttl=ttl)
+        self.motor = MotorStateTracker(ttl=motor_tracking_ttl)
         self._visible_nodes: dict[str | int, TopologyNode] = {}
         self._watchdog: asyncio.Task[None] | None = None
+        self._motor_watchdog: asyncio.Task[None] | None = None
         self._state_listeners: list[StateListener] = []
         self._property_listeners: list[PropertyListener] = []
         self._refresh_requester: RefreshRequester | None = None
@@ -89,6 +95,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
 
     async def close(self) -> None:
         self._cancel_watchdog()
+        self._cancel_motor_watchdog()
         await super().close()
 
     async def handle(self, message: DeviceStateActorMessage) -> Any:
@@ -109,6 +116,10 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             return None
         if isinstance(message, ApplyOptimisticPropsCommand):
             return await self._apply_optimistic_props(message.props_by_node)
+        if isinstance(message, ApplyMotorTargetsCommand):
+            return await self._apply_motor_targets(message)
+        if isinstance(message, ApplyMotorStopCommand):
+            return await self._apply_motor_stop(message)
         if isinstance(message, SyncStartedEvent):
             return await self._handle_sync_started()
         if isinstance(message, SyncCompletedEvent):
@@ -120,6 +131,8 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             return await self._handle_session_status(message)
         if isinstance(message, ExpireOptimisticStateCommand):
             return await self._expire_optimistic()
+        if isinstance(message, ExpireMotorTrackingCommand):
+            return await self._expire_motor_tracking()
         raise TypeError(f"unsupported device state message: {type(message).__name__}")
 
     async def _apply_topology(self, message: ApplyTopologyCommand) -> None:
@@ -152,10 +165,26 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         topology_changed: bool,
     ) -> None:
         affected = self._reconcile_overlay_from_message(event.message)
+        motor_affected = self.motor.apply_authoritative_changes(
+            event.changes,
+            self.state.nodes,
+            now=asyncio.get_running_loop().time(),
+        )
+        if not event.changes:
+            motor_affected.update(
+                self.motor.apply_authoritative_message(
+                    event.message,
+                    self.state.nodes,
+                    now=asyncio.get_running_loop().time(),
+                )
+            )
         if topology_changed:
             affected.update(self.overlay.clear_missing_nodes(self.state.nodes))
+            motor_affected.update(self.motor.clear_missing_nodes(self.state.nodes))
         if affected:
             self._schedule_watchdog()
+        if motor_affected:
+            self._schedule_motor_watchdog()
         self._rebuild_visible_cache()
         snapshot_reasons = {
             StateChangeReason.PROPERTY_PUSH,
@@ -167,8 +196,37 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         if event.changes:
             for change in event.changes:
                 await self._notify_property(change)
-        if event.changes or affected or event.reason in snapshot_reasons:
+        if event.changes or affected or motor_affected or event.reason in snapshot_reasons:
             await self._publish_snapshot(event.reason, event.message, event.changes)
+
+    async def _apply_motor_targets(self, message: ApplyMotorTargetsCommand) -> None:
+        now = asyncio.get_running_loop().time()
+        affected: set[str | int] = set()
+        for target in message.targets:
+            node = self.state.nodes.get(target.node_id)
+            current_value = _int_or_none(node.params.get(target.current_prop)) if node is not None else None
+            affected.update(self.motor.set_target(target, current_value=current_value, now=now))
+        if not affected:
+            return
+        self._schedule_motor_watchdog()
+        self._rebuild_visible_cache()
+        await self._publish_snapshot(
+            StateChangeReason.MOTOR_TARGET,
+            {"method": SyntheticSessionMethod.MOTOR_TARGET, "nodes": [{"id": node_id} for node_id in affected]},
+        )
+
+    async def _apply_motor_stop(self, message: ApplyMotorStopCommand) -> None:
+        affected: set[str | int] = set()
+        for node_id in message.node_ids:
+            affected.update(self.motor.clear_node(node_id))
+        if not affected:
+            return
+        self._schedule_motor_watchdog()
+        self._rebuild_visible_cache()
+        await self._publish_snapshot(
+            StateChangeReason.MOTOR_STOPPED,
+            {"method": SyntheticSessionMethod.MOTOR_STOP, "nodes": [{"id": node_id} for node_id in affected]},
+        )
 
     async def _apply_optimistic_props(self, optimistic_props: Mapping[str | int, Mapping[str, Any]]) -> None:
         now = asyncio.get_running_loop().time()
@@ -191,24 +249,28 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
 
     async def _handle_sync_started(self) -> None:
         affected = self.overlay.clear_all()
+        motor_affected = self.motor.clear_all()
         self._cancel_watchdog()
-        if affected:
+        self._cancel_motor_watchdog()
+        if affected or motor_affected:
             self._rebuild_visible_cache()
             await self._publish_snapshot(
-                StateChangeReason.OPTIMISTIC_CLEARED,
-                {"method": SyntheticSessionMethod.OVERLAY_CLEAR},
+                StateChangeReason.OPTIMISTIC_CLEARED if affected else StateChangeReason.MOTOR_TRACKING_CLEARED,
+                {"method": SyntheticSessionMethod.OVERLAY_CLEAR if affected else SyntheticSessionMethod.MOTOR_CLEAR},
             )
 
     async def _handle_session_status(self, event: SessionStatusChanged) -> None:
         if event.current not in {GatewaySessionState.DISCONNECTED, GatewaySessionState.CLOSING}:
             return
         affected = self.overlay.clear_all()
+        motor_affected = self.motor.clear_all()
         self._cancel_watchdog()
-        if affected:
+        self._cancel_motor_watchdog()
+        if affected or motor_affected:
             self._rebuild_visible_cache()
             await self._publish_snapshot(
-                StateChangeReason.OPTIMISTIC_CLEARED,
-                {"method": SyntheticSessionMethod.OVERLAY_CLEAR},
+                StateChangeReason.OPTIMISTIC_CLEARED if affected else StateChangeReason.MOTOR_TRACKING_CLEARED,
+                {"method": SyntheticSessionMethod.OVERLAY_CLEAR if affected else SyntheticSessionMethod.MOTOR_CLEAR},
             )
 
     async def _expire_optimistic(self) -> None:
@@ -220,6 +282,24 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         await self._publish_snapshot(
             StateChangeReason.OPTIMISTIC_EXPIRED,
             {"method": SyntheticSessionMethod.OVERLAY_EXPIRED, "nodes": [{"id": node_id} for node_id in affected]},
+        )
+        if self._refresh_requester is None:
+            return
+        for node_id in affected:
+            create_actor_task(
+                _call_listener(self._refresh_requester, RefreshNodeRequestedEvent(node_id=node_id)),
+                name=f"yeelight-pro-refresh-node-{node_id}",
+            )
+
+    async def _expire_motor_tracking(self) -> None:
+        affected = self.motor.expire(now=asyncio.get_running_loop().time())
+        self._schedule_motor_watchdog()
+        if not affected:
+            return
+        self._rebuild_visible_cache()
+        await self._publish_snapshot(
+            StateChangeReason.MOTOR_TRACKING_EXPIRED,
+            {"method": SyntheticSessionMethod.MOTOR_EXPIRED, "nodes": [{"id": node_id} for node_id in affected]},
         )
         if self._refresh_requester is None:
             return
@@ -251,15 +331,33 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             name="yeelight-pro-device-state-overlay-watchdog",
         )
 
+    def _schedule_motor_watchdog(self) -> None:
+        self._cancel_motor_watchdog()
+        now = asyncio.get_running_loop().time()
+        next_expiration = self.motor.next_expiration(now=now)
+        if next_expiration is None:
+            return
+        self._motor_watchdog = self.defer_later(
+            max(0.0, next_expiration - now),
+            ExpireMotorTrackingCommand(),
+            name="yeelight-pro-device-state-motor-watchdog",
+        )
+
     def _cancel_watchdog(self) -> None:
         if self._watchdog is not None:
             self._watchdog.cancel()
             self._watchdog = None
 
+    def _cancel_motor_watchdog(self) -> None:
+        if self._motor_watchdog is not None:
+            self._motor_watchdog.cancel()
+            self._motor_watchdog = None
+
     def _rebuild_visible_cache(self) -> None:
         now = asyncio.get_running_loop().time()
         self._visible_nodes = {
-            node_id: self.overlay.visible_node(node, now=now) for node_id, node in self.state.nodes.items()
+            node_id: self.motor.visible_node(self.overlay.visible_node(node, now=now))
+            for node_id, node in self.state.nodes.items()
         }
 
     async def _publish_snapshot(
@@ -282,6 +380,19 @@ def _payload_node_id(item: Mapping[str, Any]) -> str | int | None:
     if isinstance(item_id, bool) or not isinstance(item_id, (str, int)):
         return None
     return item_id
+
+
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
 
 
 async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:

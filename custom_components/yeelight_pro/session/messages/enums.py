@@ -15,6 +15,10 @@ class StateChangeReason(StrEnum):
     OPTIMISTIC_UPDATE = "optimistic update"
     OPTIMISTIC_CLEARED = "optimistic_cleared"
     OPTIMISTIC_EXPIRED = "optimistic expired"
+    MOTOR_TARGET = "motor target"
+    MOTOR_STOPPED = "motor stopped"
+    MOTOR_TRACKING_CLEARED = "motor tracking cleared"
+    MOTOR_TRACKING_EXPIRED = "motor tracking expired"
 
 
 class FullSyncSource(StrEnum):
@@ -28,3 +32,7 @@ class SyntheticSessionMethod(StrEnum):
     OVERLAY_OPTIMISTIC = "gateway_overlay.optimistic"
     OVERLAY_CLEAR = "gateway_overlay.clear"
     OVERLAY_EXPIRED = "gateway_overlay.expired"
+    MOTOR_TARGET = "gateway_motor.target"
+    MOTOR_STOP = "gateway_motor.stop"
+    MOTOR_CLEAR = "gateway_motor.clear"
+    MOTOR_EXPIRED = "gateway_motor.expired"

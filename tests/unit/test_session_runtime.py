@@ -20,6 +20,8 @@ from yeelight_pro.session.actors import (  # noqa: E402
     create_actor_task,
 )
 from yeelight_pro.session.messages import (  # noqa: E402
+    ApplyMotorStopCommand,
+    ApplyMotorTargetsCommand,
     ApplyOptimisticPropsCommand,
     ApplyPropertiesCommand,
     ApplyTopologyCommand,
@@ -27,7 +29,12 @@ from yeelight_pro.session.messages import (  # noqa: E402
     StateSnapshotChanged,
     SyncStartedEvent,
 )
-from yeelight_pro.session.model import GatewaySessionState  # noqa: E402
+from yeelight_pro.session.model import (  # noqa: E402
+    MOTOR_TRACKING_POSITION_MOTION,
+    MOTOR_TRACKING_TARGET_POSITION,
+    GatewaySessionState,
+    MotorTargetIntent,
+)
 
 
 class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -274,6 +281,77 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(refreshes, ["light-1"])
         self.assertFalse(state.has_pending("light-1", ["p"]))
+        await state.close()
+
+    async def test_device_state_tracks_motor_target_push_stop_disconnect_and_expiry(self) -> None:
+        state = DeviceStateActor(motor_tracking_ttl=0.02)
+        state_ref = ActorRef(state)
+        refreshes: list[str | int] = []
+        state.set_refresh_requester(lambda event: refreshes.append(event.node_id))
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload={
+                    "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 20, "tp": 20}}],
+                    "groups": [],
+                    "rooms": [],
+                    "scenes": [],
+                },
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(
+            ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 80),))
+        )
+        visible = state.visible_node("curtain-1")
+        self.assertEqual(visible.params["cp"], 20)
+        self.assertEqual(visible.params[MOTOR_TRACKING_TARGET_POSITION], 80)
+        self.assertEqual(visible.params[MOTOR_TRACKING_POSITION_MOTION], "opening")
+
+        await state_ref.ask(
+            ApplyPropertiesCommand(
+                payload={"method": "gateway_post.prop", "nodes": [{"id": "curtain-1", "params": {"cp": 45}}]},
+                reason="property push",
+            )
+        )
+        visible = state.visible_node("curtain-1")
+        self.assertEqual(visible.params["cp"], 45)
+        self.assertEqual(visible.params[MOTOR_TRACKING_TARGET_POSITION], 80)
+
+        await state_ref.ask(
+            ApplyPropertiesCommand(
+                payload={"method": "gateway_post.prop", "nodes": [{"id": "curtain-1", "params": {"cp": 80}}]},
+                reason="property push",
+            )
+        )
+        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
+
+        await state_ref.ask(
+            ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),))
+        )
+        await state_ref.ask(ApplyMotorStopCommand(("curtain-1",)))
+        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
+
+        await state_ref.ask(
+            ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),))
+        )
+        await state_ref.tell(
+            SessionStatusChanged(
+                previous=GatewaySessionState.READY,
+                current=GatewaySessionState.DISCONNECTED,
+                error=RuntimeError("closed"),
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
+
+        await state_ref.ask(
+            ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),))
+        )
+        await asyncio.sleep(0.05)
+        self.assertEqual(refreshes, ["curtain-1"])
+        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
         await state.close()
 
 

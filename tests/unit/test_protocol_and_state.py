@@ -15,7 +15,14 @@ from yeelight_pro.core import (  # noqa: E402
     parse_discovery_response,
     parse_line,
 )
-from yeelight_pro.session.model import GatewayState, OptimisticStateOverlay  # noqa: E402
+from yeelight_pro.session.model import (  # noqa: E402
+    MOTOR_TRACKING_POSITION_MOTION,
+    MOTOR_TRACKING_TARGET_POSITION,
+    GatewayState,
+    MotorStateTracker,
+    MotorTargetIntent,
+    OptimisticStateOverlay,
+)
 
 
 class ProtocolAndStateTests(unittest.TestCase):
@@ -272,6 +279,87 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertFalse(overlay.has_pending("light-1", ["1"]))
         self.assertEqual(overlay.reconcile_node_props(True, {"p": True}), set())
         self.assertEqual(overlay.clear_node("light-1"), {"light-1"})
+
+    def test_motor_tracking_uses_target_without_overwriting_current_position(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 20, "tp": 20}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        tracker = MotorStateTracker(ttl=30.0)
+
+        affected = tracker.set_target(
+            MotorTargetIntent("curtain-1", "cp", "tp", 80),
+            current_value=20,
+            now=1.0,
+        )
+        visible = tracker.visible_node(state.nodes["curtain-1"])
+
+        self.assertEqual(affected, {"curtain-1"})
+        self.assertEqual(visible.params["cp"], 20)
+        self.assertEqual(visible.params[MOTOR_TRACKING_TARGET_POSITION], 80)
+        self.assertEqual(visible.params[MOTOR_TRACKING_POSITION_MOTION], "opening")
+
+    def test_motor_tracking_authoritative_push_updates_direction_and_completion(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 80, "tp": 80}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        tracker = MotorStateTracker(ttl=30.0)
+
+        changes = state.apply_properties(
+            {"method": "gateway_post.prop", "nodes": [{"id": "curtain-1", "params": {"cp": 60, "tp": 20}}]}
+        )
+        self.assertEqual(
+            tracker.apply_authoritative_changes(changes, state.nodes, now=1.0),
+            {"curtain-1"},
+        )
+        visible = tracker.visible_node(state.nodes["curtain-1"])
+        self.assertEqual(visible.params["cp"], 60)
+        self.assertEqual(visible.params[MOTOR_TRACKING_TARGET_POSITION], 20)
+        self.assertEqual(visible.params[MOTOR_TRACKING_POSITION_MOTION], "closing")
+
+        changes = state.apply_properties(
+            {"method": "gateway_post.prop", "nodes": [{"id": "curtain-1", "params": {"cp": 20}}]}
+        )
+        self.assertEqual(
+            tracker.apply_authoritative_changes(changes, state.nodes, now=2.0),
+            {"curtain-1"},
+        )
+        visible = tracker.visible_node(state.nodes["curtain-1"])
+        self.assertEqual(visible.params["cp"], 20)
+        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, visible.params)
+
+    def test_motor_tracking_stop_and_expiry_clear_visible_target(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 10}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        tracker = MotorStateTracker(ttl=5.0)
+
+        tracker.set_target(MotorTargetIntent("curtain-1", "cp", "tp", 90), current_value=10, now=1.0)
+        self.assertTrue(tracker.has_tracking("curtain-1"))
+        self.assertEqual(tracker.clear_node("curtain-1"), {"curtain-1"})
+        self.assertFalse(tracker.has_tracking("curtain-1"))
+
+        tracker.set_target(MotorTargetIntent("curtain-1", "cp", "tp", 90), current_value=10, now=10.0)
+        self.assertEqual(tracker.expire(now=14.9), set())
+        self.assertEqual(tracker.expire(now=15.0), {"curtain-1"})
+        self.assertFalse(tracker.has_tracking("curtain-1"))
 
     def test_gateway_event_normalization_for_programmable_switches(self) -> None:
         events = list(

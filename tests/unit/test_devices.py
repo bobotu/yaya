@@ -31,6 +31,8 @@ from yeelight_pro.core.devices import (  # noqa: E402
     MultiSwitchDevice,
     ProgrammableSwitchDevice,
     create_device,
+    curtain_position_known,
+    curtain_tilt_position_known,
 )
 
 
@@ -180,6 +182,67 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
             self.executor.commands[2].to_payload()["action"],
             {"motorAdjust": {"type": str(MotorAction.PAUSE)}},
         )
+
+    async def test_curtain_position_is_unknown_when_route_state_is_lost(self) -> None:
+        lost = TopologyNode.from_mapping(
+            {
+                "id": 61389855,
+                "nt": 2,
+                "type": 6,
+                "pt": 6,
+                "name": "Curtain",
+                "params": {"rs": 0},
+            }
+        )
+        positioned_but_uncalibrated = TopologyNode.from_mapping(
+            {
+                "id": "curtain-positioned",
+                "nt": 2,
+                "type": 6,
+                "pt": 6,
+                "params": {"rs": 0, "cp": 0},
+            }
+        )
+        calibrated = TopologyNode.from_mapping(
+            {
+                "id": "curtain-calibrated",
+                "nt": 2,
+                "type": 6,
+                "pt": 6,
+                "params": {"rs": 1, "cp": 100, "tp": 100},
+            }
+        )
+
+        self.assertFalse(curtain_position_known(lost))
+        self.assertFalse(create_device(lost, self.executor).position_known)
+        self.assertFalse(curtain_position_known(positioned_but_uncalibrated))
+        self.assertTrue(curtain_position_known(calibrated))
+
+    async def test_dream_curtain_tilt_position_is_unknown_when_tilt_route_state_is_lost(self) -> None:
+        lost = TopologyNode.from_mapping(
+            {
+                "id": "dream-curtain-lost-tilt",
+                "nt": 2,
+                "type": 6,
+                "pt": 22,
+                "params": {"rs": 1, "cp": 100, "tp": 100, "trs": 0},
+            }
+        )
+        calibrated = TopologyNode.from_mapping(
+            {
+                "id": "dream-curtain-calibrated-tilt",
+                "nt": 2,
+                "type": 6,
+                "pt": 22,
+                "params": {"rs": 1, "cp": 100, "tp": 100, "trs": 1, "cra": 90, "tra": 90},
+            }
+        )
+
+        self.assertFalse(curtain_tilt_position_known(lost))
+        device = create_device(lost, self.executor)
+        self.assertIsInstance(device, DreamCurtainDevice)
+        self.assertFalse(device.tilt_position_known)
+        self.assertTrue(curtain_tilt_position_known(calibrated))
 
     async def test_switch_air_condition_and_sensor_models(self) -> None:
         switch = create_device(self.nodes["switch-1"], self.executor)

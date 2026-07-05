@@ -8,6 +8,8 @@ from ...core.const import GATEWAY_CONTROL_PORT
 from ...core.protocol import GatewayMethod
 from ..actors import ActorRef, ConnectionActor, DeviceStateActor, SessionActor
 from ..messages import (
+    ApplyMotorStopCommand,
+    ApplyMotorTargetsCommand,
     ApplyOptimisticPropsCommand,
     CloseConnectionCommand,
     ConfigureAutoSyncCommand,
@@ -21,6 +23,7 @@ from ..messages import (
     StartConnectionCommand,
     SyncSessionCommand,
 )
+from ..model.motor import MotorTargetIntent
 from ..model.optimistic import OPTIMISTIC_STATE_TTL
 from ..model.status import GatewaySessionState
 from ..transport import GatewayRPC
@@ -150,6 +153,12 @@ class YeelightProRuntime:
 
     async def apply_optimistic_props(self, props_by_node: Mapping[str | int, Mapping[str, Any]]) -> None:
         await self.state_ref.ask(ApplyOptimisticPropsCommand(props_by_node))
+
+    async def apply_motor_targets(self, targets: tuple[MotorTargetIntent, ...]) -> None:
+        await self.state_ref.ask(ApplyMotorTargetsCommand(targets))
+
+    async def apply_motor_stop(self, node_ids: tuple[str | int, ...]) -> None:
+        await self.state_ref.ask(ApplyMotorStopCommand(node_ids))
 
     async def get_topology(self) -> JSONDict:
         return await self.request(GatewayMethod.GET_TOPOLOGY)
