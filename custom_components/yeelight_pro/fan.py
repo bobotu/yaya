@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
 from .core.topology import DeviceType
-from .entity import YeelightProEntity, async_call_gateway
+from .entity import YeelightProEntity, async_set_node_props
 from .helpers import device_type
 from .platform import async_add_dynamic_entities
 
@@ -55,6 +55,10 @@ class YeelightProBathHeaterFan(YeelightProEntity, FanEntity):
         self._attr_translation_key = translation_key
 
     @property
+    def optimistic_properties(self) -> tuple[str, ...]:
+        return (self._prop,)
+
+    @property
     def is_on(self) -> bool | None:
         level = _level(self.node, self._prop)
         return None if level is None else level > 0
@@ -80,7 +84,7 @@ class YeelightProBathHeaterFan(YeelightProEntity, FanEntity):
         if node is None:
             return
         level = max(0, min(3, round(percentage * 3 / 100)))
-        await async_call_gateway(self.coordinator.gateway.set_node_props(node.id, {self._prop: level}, nt=node.nt))
+        await async_set_node_props(self.coordinator, node, {self._prop: level})
 
 
 def _level(node: Any, prop: str) -> int | None:

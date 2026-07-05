@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
 from .core.topology import DeviceType
-from .entity import YeelightProEntity, async_call_gateway
+from .entity import YeelightProEntity, async_set_node_props
 from .helpers import device_type
 from .platform import async_add_dynamic_entities
 
@@ -101,6 +101,10 @@ class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
         self.entity_description = description
 
     @property
+    def optimistic_properties(self) -> tuple[str, ...]:
+        return (self.entity_description.key,)
+
+    @property
     def native_value(self) -> float | None:
         node = self.node
         if node is None:
@@ -111,9 +115,7 @@ class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
         node = self.node
         if node is None:
             return
-        await async_call_gateway(
-            self.coordinator.gateway.set_node_props(node.id, {self.entity_description.key: round(value)}, nt=node.nt)
-        )
+        await async_set_node_props(self.coordinator, node, {self.entity_description.key: round(value)})
 
 
 def _indexed_props(node: Any, suffix: str) -> tuple[str, ...]:

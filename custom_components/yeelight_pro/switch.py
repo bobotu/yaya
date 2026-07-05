@@ -9,9 +9,8 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
-from .core.devices import DoubleSwitchDevice, MultiSwitchDevice
 from .core.topology import DeviceType
-from .entity import YeelightProEntity, async_call_gateway
+from .entity import YeelightProEntity, async_set_node_props
 from .helpers import (
     device_type,
     is_double_switch_node,
@@ -62,6 +61,11 @@ class YeelightProRelaySwitch(YeelightProEntity, SwitchEntity):
         self._attr_translation_placeholders = {"channel": str(channel)}
 
     @property
+    def optimistic_properties(self) -> tuple[str, ...]:
+        node = self.node
+        return () if node is None else (relay_prop_name(node, self._channel),)
+
+    @property
     def is_on(self) -> bool | None:
         node = self.node
         if node is None:
@@ -97,14 +101,7 @@ class YeelightProRelaySwitch(YeelightProEntity, SwitchEntity):
         node = self.node
         if node is None:
             return
-        if is_double_switch_node(node):
-            await async_call_gateway(
-                DoubleSwitchDevice(node, self.coordinator.gateway).set_channel(self._channel, is_on)
-            )
-        else:
-            await async_call_gateway(
-                MultiSwitchDevice(node, self.coordinator.gateway).set_channel(self._channel, is_on)
-            )
+        await async_set_node_props(self.coordinator, node, {relay_prop_name(node, self._channel): is_on})
 
 
 class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
@@ -120,6 +117,10 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
         super().__init__(coordinator, node, prop)
         self._prop = prop
         self._attr_translation_key = translation_key
+
+    @property
+    def optimistic_properties(self) -> tuple[str, ...]:
+        return (self._prop,)
 
     @property
     def is_on(self) -> bool | None:
@@ -143,7 +144,7 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
         node = self.node
         if node is None:
             return
-        await async_call_gateway(self.coordinator.gateway.set_node_props(node.id, {self._prop: value}, nt=node.nt))
+        await async_set_node_props(self.coordinator, node, {self._prop: value})
 
 
 def _indexed_props(node: Any, suffix: str) -> tuple[str, ...]:
