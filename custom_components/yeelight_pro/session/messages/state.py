@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 from ...core.updates import PropertyChange
+from ..model.motor import MotorTargetIntent
 from .enums import FullSyncSource, StateChangeReason
 from .public import SessionStatusChanged
 
@@ -34,6 +35,16 @@ class RefreshNodeRequestedEvent:
 @dataclass(frozen=True)
 class ApplyOptimisticPropsCommand:
     props_by_node: Mapping[str | int, Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
+class ApplyMotorTargetsCommand:
+    targets: tuple[MotorTargetIntent, ...]
+
+
+@dataclass(frozen=True)
+class ApplyMotorStopCommand:
+    node_ids: tuple[str | int, ...]
 
 
 @dataclass(frozen=True)
@@ -81,6 +92,11 @@ class ExpireOptimisticStateCommand:
     pass
 
 
+@dataclass(frozen=True)
+class ExpireMotorTrackingCommand:
+    pass
+
+
 DeviceStateActorMessage: TypeAlias = (
     ApplyTopologyCommand
     | ApplyPropertiesCommand
@@ -89,8 +105,11 @@ DeviceStateActorMessage: TypeAlias = (
     | ApplyRoomsCommand
     | ApplyScenesCommand
     | ApplyOptimisticPropsCommand
+    | ApplyMotorTargetsCommand
+    | ApplyMotorStopCommand
     | SyncStartedEvent
     | SyncCompletedEvent
     | SessionStatusChanged
     | ExpireOptimisticStateCommand
+    | ExpireMotorTrackingCommand
 )

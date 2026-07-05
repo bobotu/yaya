@@ -20,6 +20,7 @@ from yeelight_pro.session import (
     YeelightProGateway,  # noqa: E402
 )
 from yeelight_pro.session.messages import RpcPushEvent, SetSessionStateCommand  # noqa: E402
+from yeelight_pro.session.model import MOTOR_TRACKING_TARGET_POSITION  # noqa: E402
 
 
 class RpcClientTests(unittest.IsolatedAsyncioTestCase):
@@ -175,6 +176,42 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await gateway.set_event([])
         with self.assertRaises(ValueError):
             await gateway.set_curtain_position("curtain-1", 101)
+
+    async def test_curtain_position_command_tracks_target_without_overwriting_current(self) -> None:
+        received: list[dict[str, Any]] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                request = parse_line(await reader.readline())
+                received.append(request)
+                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8"))
+                writer.write(b"\r\n")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(host, port=port)
+
+        try:
+            gateway.state.apply_topology(
+                {
+                    "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 20, "tp": 20}}],
+                    "groups": [],
+                    "rooms": [],
+                    "scenes": [],
+                }
+            )
+            await gateway.connect()
+            await gateway.set_curtain_position("curtain-1", 80)
+            self.assertEqual(gateway.state.nodes["curtain-1"].params["cp"], 20)
+            self.assertEqual(gateway.visible_node("curtain-1").params["cp"], 20)
+            self.assertEqual(gateway.visible_node("curtain-1").params[MOTOR_TRACKING_TARGET_POSITION], 80)
+        finally:
+            await gateway.close()
+
+        self.assertEqual(received[0]["nodes"], [{"id": "curtain-1", "nt": 2, "set": {"tp": 80}}])
 
     async def test_rpc_request_requires_connected_transport(self) -> None:
         rpc = GatewayRPC("127.0.0.1", port=1)

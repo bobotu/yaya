@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..commands import MotorAction, NodeCommand, motor_adjust_action
+from ..topology import TopologyNode
 from .base import Device
 
 
@@ -19,6 +20,10 @@ class CurtainDevice(Device):
     def is_route_calibrated(self) -> bool | None:
         value = _int_or_none(self.node.params.get("rs"))
         return None if value is None else value == 1
+
+    @property
+    def position_known(self) -> bool:
+        return curtain_position_known(self.node)
 
     async def set_position(self, position: int, *, duration: int | None = None) -> dict[str, Any]:
         self._validate_range("position", position, 0, 100)
@@ -53,6 +58,10 @@ class DreamCurtainDevice(CurtainDevice):
         value = _int_or_none(self.node.params.get("trs"))
         return None if value is None else value == 1
 
+    @property
+    def tilt_position_known(self) -> bool:
+        return curtain_tilt_position_known(self.node)
+
     async def set_angle(self, angle: int, *, duration: int | None = None) -> dict[str, Any]:
         self._validate_range("angle", angle, 0, 180)
         return await self.set_props({"tra": angle}, duration=duration)
@@ -78,3 +87,13 @@ def _int_or_none(value: Any) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def curtain_position_known(node: TopologyNode) -> bool:
+    route_state = _int_or_none(node.params.get("rs"))
+    return route_state != 0
+
+
+def curtain_tilt_position_known(node: TopologyNode) -> bool:
+    tilt_route_state = _int_or_none(node.params.get("trs"))
+    return tilt_route_state != 0

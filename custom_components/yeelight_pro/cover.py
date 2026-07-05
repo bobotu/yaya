@@ -15,10 +15,19 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
 from .core import is_dream_curtain
-from .core.devices import CurtainDevice, DreamCurtainDevice
+from .core.devices import CurtainDevice, DreamCurtainDevice, curtain_position_known, curtain_tilt_position_known
 from .entity import YeelightProEntity, async_call_gateway
 from .helpers import is_cover_node
 from .platform import async_add_dynamic_entities
+from .session.model import (
+    MOTOR_MOTION_CLOSING,
+    MOTOR_MOTION_OPENING,
+    MOTOR_TRACKING_ANGLE_MOTION,
+    MOTOR_TRACKING_ASSUMED,
+    MOTOR_TRACKING_POSITION_MOTION,
+    MOTOR_TRACKING_TARGET_ANGLE,
+    MOTOR_TRACKING_TARGET_POSITION,
+)
 
 
 async def async_setup_entry(
@@ -45,25 +54,50 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
 
     @property
     def supported_features(self) -> CoverEntityFeature:
-        features = (
-            CoverEntityFeature.OPEN
-            | CoverEntityFeature.CLOSE
-            | CoverEntityFeature.STOP
-            | CoverEntityFeature.SET_POSITION
-        )
+        features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
         node = self.node
+        if node is None or curtain_position_known(node):
+            features |= CoverEntityFeature.SET_POSITION
         if node is not None and _has_tilt(node):
-            features |= (
-                CoverEntityFeature.OPEN_TILT
-                | CoverEntityFeature.CLOSE_TILT
-                | CoverEntityFeature.STOP_TILT
-                | CoverEntityFeature.SET_TILT_POSITION
-            )
+            features |= CoverEntityFeature.OPEN_TILT | CoverEntityFeature.CLOSE_TILT | CoverEntityFeature.STOP_TILT
+            if curtain_tilt_position_known(node):
+                features |= CoverEntityFeature.SET_TILT_POSITION
         return features
 
     @property
     def current_cover_position(self) -> int | None:
-        return _int_param(self.node, "cp")
+        node = self.node
+        if node is None or not curtain_position_known(node):
+            return None
+        return _int_param(node, "cp")
+
+    @property
+    def target_cover_position(self) -> int | None:
+        node = self.node
+        if node is None or not curtain_position_known(node):
+            return None
+        return _int_param(node, MOTOR_TRACKING_TARGET_POSITION)
+
+    @property
+    def is_opening(self) -> bool | None:
+        motion = _str_param(self.node, MOTOR_TRACKING_POSITION_MOTION) or _str_param(
+            self.node, MOTOR_TRACKING_ANGLE_MOTION
+        )
+        return None if motion is None else motion == MOTOR_MOTION_OPENING
+
+    @property
+    def is_closing(self) -> bool | None:
+        motion = _str_param(self.node, MOTOR_TRACKING_POSITION_MOTION) or _str_param(
+            self.node, MOTOR_TRACKING_ANGLE_MOTION
+        )
+        return None if motion is None else motion == MOTOR_MOTION_CLOSING
+
+    @property
+    def assumed_state(self) -> bool:
+        node = self.node
+        if node is not None and _has_unknown_route_position(node):
+            return True
+        return _bool_param(node, MOTOR_TRACKING_ASSUMED) or super().assumed_state
 
     @property
     def is_closed(self) -> bool | None:
@@ -72,7 +106,18 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
 
     @property
     def current_cover_tilt_position(self) -> int | None:
-        angle = _int_param(self.node, "cra")
+        node = self.node
+        if node is None or not curtain_tilt_position_known(node):
+            return None
+        angle = _int_param(node, "cra")
+        return None if angle is None else _angle_to_tilt(angle)
+
+    @property
+    def target_cover_tilt_position(self) -> int | None:
+        node = self.node
+        if node is None or not curtain_tilt_position_known(node):
+            return None
+        angle = _int_param(node, MOTOR_TRACKING_TARGET_ANGLE)
         return None if angle is None else _angle_to_tilt(angle)
 
     async def async_open_cover(self, **kwargs: Any) -> None:
@@ -125,6 +170,10 @@ def _has_tilt(node: Any) -> bool:
     return is_dream_curtain(node) or any(key in node.params for key in ("cra", "tra", "trs"))
 
 
+def _has_unknown_route_position(node: Any) -> bool:
+    return not curtain_position_known(node) or (_has_tilt(node) and not curtain_tilt_position_known(node))
+
+
 def _int_param(node: Any, key: str) -> int | None:
     if node is None:
         return None
@@ -134,6 +183,19 @@ def _int_param(node: Any, key: str) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+def _str_param(node: Any, key: str) -> str | None:
+    if node is None:
+        return None
+    value = node.params.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _bool_param(node: Any, key: str) -> bool:
+    if node is None:
+        return False
+    return node.params.get(key) is True
 
 
 def _angle_to_tilt(angle: int) -> int:

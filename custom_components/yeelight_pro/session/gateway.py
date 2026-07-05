@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime
@@ -19,7 +20,15 @@ from .messages import (
     SessionEvent,
     StateSnapshotChanged,
 )
-from .model import OPTIMISTIC_STATE_TTL, GatewaySessionState
+from .model import (
+    MOTOR_CURRENT_ANGLE_PROP,
+    MOTOR_CURRENT_POSITION_PROP,
+    MOTOR_TARGET_ANGLE_PROP,
+    MOTOR_TARGET_POSITION_PROP,
+    OPTIMISTIC_STATE_TTL,
+    GatewaySessionState,
+    MotorTargetIntent,
+)
 from .runtime.gateway import YeelightProRuntime
 from .transport import GatewayRPC
 
@@ -175,6 +184,11 @@ class YeelightProGateway:
         response = await self.request(GatewayMethod.SET_PROP, {"nodes": payload})
         if optimistic_props_by_node:
             await self._runtime.apply_optimistic_props(optimistic_props_by_node)
+        targets, stops = _motor_tracking_from_payload(payload)
+        if targets:
+            await self._runtime.apply_motor_targets(tuple(targets))
+        if stops:
+            await self._runtime.apply_motor_stop(tuple(stops))
         return response
 
     async def set_scenes(self, scenes: Iterable[Mapping[str, Any]]) -> JSONDict:
@@ -257,6 +271,9 @@ class YeelightProGateway:
     def optimistic_diagnostics(self) -> dict[str, Any]:
         return self._state_actor.diagnostics()
 
+    def motor_tracking_diagnostics(self) -> dict[str, Any]:
+        return self._state_actor.motor.diagnostics(now=asyncio.get_running_loop().time())
+
     def add_event_listener(self, listener: EventListener) -> Callable[[], None]:
         return self._session.add_gateway_event_listener(_wrap_gateway_event_listener(listener))
 
@@ -314,3 +331,62 @@ async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
 def _validate_range(name: str, value: int, minimum: int, maximum: int) -> None:
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
+
+
+def _motor_tracking_from_payload(
+    payload: Iterable[Mapping[str, Any]],
+) -> tuple[list[MotorTargetIntent], list[str | int]]:
+    targets: list[MotorTargetIntent] = []
+    stops: list[str | int] = []
+    for item in payload:
+        node_id = item.get("id")
+        if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
+            continue
+        props = item.get("set")
+        if isinstance(props, Mapping):
+            position = _int_or_none(props.get(MOTOR_TARGET_POSITION_PROP))
+            if position is not None:
+                targets.append(
+                    MotorTargetIntent(
+                        node_id=node_id,
+                        current_prop=MOTOR_CURRENT_POSITION_PROP,
+                        target_prop=MOTOR_TARGET_POSITION_PROP,
+                        target_value=position,
+                    )
+                )
+            angle = _int_or_none(props.get(MOTOR_TARGET_ANGLE_PROP))
+            if angle is not None:
+                targets.append(
+                    MotorTargetIntent(
+                        node_id=node_id,
+                        current_prop=MOTOR_CURRENT_ANGLE_PROP,
+                        target_prop=MOTOR_TARGET_ANGLE_PROP,
+                        target_value=angle,
+                    )
+                )
+        action = item.get("action")
+        if _is_motor_pause(action):
+            stops.append(node_id)
+    return targets, stops
+
+
+def _is_motor_pause(action: object) -> bool:
+    if not isinstance(action, Mapping):
+        return False
+    motor_adjust = action.get("motorAdjust")
+    if not isinstance(motor_adjust, Mapping):
+        return False
+    return motor_adjust.get("type") == str(MotorAction.PAUSE)
+
+
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
