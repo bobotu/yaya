@@ -38,8 +38,9 @@ from custom_components.yeelight_pro.const import (
     SWITCH_MODE_WIRELESS,
 )
 from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand
-from custom_components.yeelight_pro.entity import YeelightProGatewayUnavailableError
+from custom_components.yeelight_pro.entity import YeelightProGatewayUnavailableError, YeelightProNodeUnavailableError
 from custom_components.yeelight_pro.helpers import node_unique_id
+from custom_components.yeelight_pro.light import YeelightProLight
 from custom_components.yeelight_pro.session import (
     GatewaySessionState,
     SessionStatusChanged,
@@ -867,6 +868,72 @@ async def test_light_service_maps_transition_and_flash(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["action"] == {"blink": {"repeat": 4, "type": "urgent"}}
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_light_service_skips_unavailable_entity_without_gateway_command(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        updated_fixture = deepcopy(topology_fixture)
+        light_node = next(node for node in updated_fixture["nodes"] if node["id"] == "light-1")
+        light_node["o"] = False
+
+        gateway.replace_topology(updated_fixture)
+        await hass.async_block_till_done()
+
+        assert hass.states.get(light_entity_id).state == STATE_UNAVAILABLE
+        command_count = len(gateway.commands)
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {ATTR_ENTITY_ID: light_entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+        assert len(gateway.commands) == command_count
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize("missing_node", [False, True])
+async def test_light_action_raises_when_current_node_is_unavailable(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+    missing_node: bool,
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        node = gateway.visible_node("light-1")
+        assert node is not None
+        entity = YeelightProLight(entry.runtime_data, node)
+        updated_fixture = deepcopy(topology_fixture)
+        if missing_node:
+            updated_fixture["nodes"] = [node for node in updated_fixture["nodes"] if node["id"] != "light-1"]
+        else:
+            light_node = next(node for node in updated_fixture["nodes"] if node["id"] == "light-1")
+            light_node["o"] = False
+
+        gateway.replace_topology(updated_fixture)
+        await hass.async_block_till_done()
+
+        command_count = len(gateway.commands)
+        with pytest.raises(YeelightProNodeUnavailableError) as err:
+            await entity.async_turn_on()
+
+        assert err.value.translation_key == "node_unavailable"
+        assert len(gateway.commands) == command_count
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

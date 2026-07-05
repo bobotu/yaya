@@ -15,6 +15,8 @@ from .entity import YeelightProEntity, async_set_node_props
 from .helpers import device_type
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 1
+
 AC_MODE_TO_HVAC = {
     1: HVACMode.COOL,
     2: HVACMode.DRY,
@@ -122,21 +124,15 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
         return None if value is None else AC_FAN_TO_HA.get(value)
 
     async def async_turn_on(self) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {self._key("acp"): True})
 
     async def async_turn_off(self) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {self._key("acp"): False})
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         if hvac_mode == HVACMode.OFF:
             await async_set_node_props(self.coordinator, node, {self._key("acp"): False})
         else:
@@ -147,16 +143,14 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
             await async_set_node_props(self.coordinator, node, props)
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        node = self.node
         temperature = kwargs.get(ATTR_TEMPERATURE)
-        if node is None or temperature is None:
+        if temperature is None:
             return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {self._key("actt"): int(temperature)})
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         speed = HA_FAN_TO_AC.get(fan_mode)
         if speed is None:
             raise ValueError(f"unsupported fan mode: {fan_mode}")
@@ -199,15 +193,11 @@ class YeelightProBathHeaterClimate(YeelightProEntity, ClimateEntity):
         return HVACMode.HEAT if _bool_param(self.node, "p") else HVACMode.OFF
 
     async def async_turn_on(self) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {"p": True})
 
     async def async_turn_off(self) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {"p": False})
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -217,10 +207,10 @@ class YeelightProBathHeaterClimate(YeelightProEntity, ClimateEntity):
             await self.async_turn_on()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        node = self.node
         temperature = kwargs.get(ATTR_TEMPERATURE)
-        if node is None or temperature is None:
+        if temperature is None:
             return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {"tgt": int(temperature)})
 
 

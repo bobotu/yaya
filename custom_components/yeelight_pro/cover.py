@@ -29,6 +29,8 @@ from .session.model import (
     MOTOR_TRACKING_TARGET_POSITION,
 )
 
+PARALLEL_UPDATES = 1
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -121,27 +123,19 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
         return None if angle is None else _angle_to_tilt(angle)
 
     async def async_open_cover(self, **kwargs: Any) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_call_gateway(CurtainDevice(node, self.coordinator.gateway).open())
 
     async def async_close_cover(self, **kwargs: Any) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_call_gateway(CurtainDevice(node, self.coordinator.gateway).close())
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_call_gateway(CurtainDevice(node, self.coordinator.gateway).stop())
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_call_gateway(CurtainDevice(node, self.coordinator.gateway).set_position(kwargs[ATTR_POSITION]))
 
     async def async_open_cover_tilt(self, **kwargs: Any) -> None:
@@ -151,18 +145,14 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
         await self._async_set_tilt_angle(0)
 
     async def async_stop_cover_tilt(self, **kwargs: Any) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_call_gateway(DreamCurtainDevice(node, self.coordinator.gateway).stop_tilt())
 
     async def async_set_cover_tilt_position(self, **kwargs: Any) -> None:
         await self._async_set_tilt_angle(_tilt_to_angle(kwargs[ATTR_TILT_POSITION]))
 
     async def _async_set_tilt_angle(self, angle: int) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_call_gateway(DreamCurtainDevice(node, self.coordinator.gateway).set_angle(angle))
 
 

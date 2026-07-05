@@ -27,6 +27,8 @@ from .entity import YeelightProEntity, async_call_gateway, async_set_node_props
 from .helpers import light_device_type
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 1
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -109,9 +111,7 @@ class YeelightProLight(YeelightProEntity, LightEntity):
         return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         brightness = kwargs.get(ATTR_BRIGHTNESS)
         brightness_percent = None if brightness is None else max(1, min(100, round(brightness * 100 / 255)))
         color_temperature = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
@@ -137,9 +137,7 @@ class YeelightProLight(YeelightProEntity, LightEntity):
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(
             self.coordinator,
             node,

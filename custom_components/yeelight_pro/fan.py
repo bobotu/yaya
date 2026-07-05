@@ -14,6 +14,8 @@ from .entity import YeelightProEntity, async_set_node_props
 from .helpers import device_type
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 1
+
 BATH_FANS = {
     "ve": "ventilation",
     "fa": "fan",
@@ -80,9 +82,7 @@ class YeelightProBathHeaterFan(YeelightProEntity, FanEntity):
         await self.async_set_percentage(0)
 
     async def async_set_percentage(self, percentage: int) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         level = max(0, min(3, round(percentage * 3 / 100)))
         await async_set_node_props(self.coordinator, node, {self._prop: level})
 

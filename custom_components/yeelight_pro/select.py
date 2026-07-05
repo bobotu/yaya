@@ -14,6 +14,8 @@ from .entity import YeelightProEntity, async_set_node_props
 from .helpers import device_type
 from .platform import async_add_dynamic_entities
 
+PARALLEL_UPDATES = 1
+
 BATH_MODE_OPTIONS = {
     "mode_1": 1,
     "mode_2": 2,
@@ -65,7 +67,5 @@ class YeelightProBathModeSelect(YeelightProEntity, SelectEntity):
         return BATH_MODE_VALUES.get(value)
 
     async def async_select_option(self, option: str) -> None:
-        node = self.node
-        if node is None:
-            return
+        node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {"bhm": BATH_MODE_OPTIONS[option]})
