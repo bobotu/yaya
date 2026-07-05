@@ -68,6 +68,65 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(state.nodes["curtain-1"].params["cp"], 25)
         self.assertEqual(state.nodes["curtain-1"].params["tra"], 45)
 
+    def test_topology_push_merges_without_removing_existing_nodes(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [
+                    {"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}},
+                    {"id": "switch-1", "nt": 2, "type": 13, "params": {"1-sp": True}},
+                ],
+                "rooms": [{"id": "room-1", "n": "Kitchen"}],
+            }
+        )
+
+        state.apply_topology(
+            {
+                "method": "gateway_post.topology",
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"l": 42}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            },
+            replace=False,
+        )
+
+        self.assertIn("switch-1", state.nodes)
+        self.assertEqual(state.nodes["light-1"].params, {"p": False, "l": 42})
+        self.assertEqual(state.rooms["room-1"]["n"], "Kitchen")
+
+    def test_full_topology_sync_retains_missing_nodes_as_unavailable(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [
+                    {"id": "light-1", "nt": 2, "type": 3, "params": {"p": True}},
+                    {"id": "switch-1", "nt": 2, "type": 13},
+                ],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+
+        state.apply_topology(
+            {
+                "nodes": [{"id": "switch-1", "nt": 2, "type": 13}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+
+        self.assertIn("light-1", state.nodes)
+        self.assertFalse(state.nodes["light-1"].online)
+        self.assertEqual(state.topology_node_ids, {"switch-1"})
+        self.assertTrue(
+            state.full_property_coverage(
+                {"method": "gateway_post.prop", "nodes": [{"id": "switch-1", "params": {"1-sp": False}, "o": True}]}
+            )
+        )
+
     def test_full_property_coverage_requires_full_snapshot_marker(self) -> None:
         state = GatewayState()
         state.apply_topology(

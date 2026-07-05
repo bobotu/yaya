@@ -22,7 +22,7 @@ from homeassistant.components.light import (
     ATTR_TRANSITION,
     FLASH_SHORT,
 )
-from homeassistant.const import ATTR_ENTITY_ID, CONF_HOST, CONF_PORT, STATE_OFF, STATE_ON
+from homeassistant.const import ATTR_ENTITY_ID, CONF_HOST, CONF_PORT, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -222,7 +222,18 @@ class FakeGateway:
     def replace_topology(self, fixture: dict[str, Any]) -> None:
         self.fixture = fixture
         self.state.apply_topology(fixture)
-        self._overlay.clear_missing_nodes(self.state.nodes)
+        self._overlay.clear_missing_nodes(self.state.topology_node_ids)
+        for listener in list(self._state_listeners):
+            listener(
+                StateSnapshotChanged(
+                    reason=StateChangeReason.TOPOLOGY_SYNC,
+                    message={"method": "gateway_sync.topology"},
+                )
+            )
+
+    def push_topology(self, fixture: dict[str, Any]) -> None:
+        self.fixture = fixture
+        self.state.apply_topology(fixture, replace=False)
         for listener in list(self._state_listeners):
             listener(
                 StateSnapshotChanged(
@@ -607,7 +618,7 @@ async def test_import_room_filter_limits_created_entities(
         await hass.async_block_till_done()
 
 
-async def test_import_room_filter_removes_stale_filtered_entities_and_device(
+async def test_import_room_filter_keeps_stale_filtered_registry_entries(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -637,16 +648,43 @@ async def test_import_room_filter_removes_stale_filtered_entities_and_device(
 
     try:
         for entity_id in stale_entity_ids:
-            assert registry.async_get(entity_id) is None
+            assert registry.async_get(entity_id) is not None
             assert hass.states.get(entity_id) is None
         for device_id in stale_device_ids:
-            assert device_registry.async_get(device_id) is None
+            assert device_registry.async_get(device_id) is not None
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
 
 
-async def test_topology_removal_reconciles_entities_and_device(
+async def test_topology_push_missing_node_keeps_entity_and_device(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        light_device = device_registry.async_get_device(identifiers={(DOMAIN, "127.0.0.1:65443:light-1")})
+        assert light_device is not None
+
+        updated_fixture = deepcopy(topology_fixture)
+        updated_fixture["nodes"] = [node for node in updated_fixture["nodes"] if node["id"] != "light-1"]
+        gateway.push_topology(updated_fixture)
+        await hass.async_block_till_done()
+
+        assert registry.async_get(light_entity_id) is not None
+        assert hass.states.get(light_entity_id) is not None
+        assert device_registry.async_get(light_device.id) is not None
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_full_topology_sync_missing_node_keeps_entity_unavailable(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -665,9 +703,11 @@ async def test_topology_removal_reconciles_entities_and_device(
         gateway.replace_topology(updated_fixture)
         await hass.async_block_till_done()
 
-        assert registry.async_get(light_entity_id) is None
-        assert hass.states.get(light_entity_id) is None
-        assert device_registry.async_get(light_device.id) is None
+        assert registry.async_get(light_entity_id) is not None
+        light_state = hass.states.get(light_entity_id)
+        assert light_state is not None
+        assert light_state.state == STATE_UNAVAILABLE
+        assert device_registry.async_get(light_device.id) is not None
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
