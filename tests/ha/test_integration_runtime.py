@@ -700,6 +700,7 @@ async def test_air_conditioner_climate_and_config_entities(
         assert hass.states.get(climate_entity_id).state == "off"
         climate_state = hass.states.get(climate_entity_id)
         assert climate_state is not None
+        assert climate_state.attributes["friendly_name"] == "Bedroom AC"
         assert climate_state.attributes["temperature"] == 24.0
         assert climate_state.attributes["hvac_modes"] == ["off", "cool", "heat", "dry", "fan_only"]
         assert climate_state.attributes["fan_mode"] == FAN_MEDIUM
@@ -762,6 +763,40 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acdfltr": 64}
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_multi_channel_air_conditioner_climate_entities_keep_channel_names(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    fixture = deepcopy(topology_fixture)
+    air_node = next(node for node in fixture["nodes"] if node["id"] == "air-1")
+    air_node["params"].update(
+        {
+            "2-aco": True,
+            "2-acp": True,
+            "2-acm": 8,
+            "2-acct": 25,
+            "2-actt": 23,
+            "2-acf": 1,
+        }
+    )
+    gateway = FakeGateway(fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        climate_1_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_air-1_air_conditioner_1")
+        climate_2_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_air-1_air_conditioner_2")
+
+        climate_1_state = hass.states.get(climate_1_entity_id)
+        climate_2_state = hass.states.get(climate_2_entity_id)
+        assert climate_1_state is not None
+        assert climate_2_state is not None
+        assert climate_1_state.attributes["friendly_name"] == "Bedroom AC Air conditioner 1"
+        assert climate_2_state.attributes["friendly_name"] == "Bedroom AC Air conditioner 2"
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
