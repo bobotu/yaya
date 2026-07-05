@@ -120,6 +120,9 @@ class YeelightProGateway:
     async def connect(self) -> None:
         await self._runtime.connect()
 
+    async def reconnect(self) -> None:
+        await self._runtime.reconnect()
+
     async def close(self) -> None:
         await self._runtime.close()
 
