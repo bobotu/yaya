@@ -136,10 +136,11 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         raise TypeError(f"unsupported device state message: {type(message).__name__}")
 
     async def _apply_topology(self, message: ApplyTopologyCommand) -> None:
-        self.state.apply_topology(message.payload)
+        topology = self.state.apply_topology(message.payload, replace=message.replace)
         await self._after_authoritative_changed(
             AuthoritativeStateChangedEvent(reason=message.reason, message=message.message),
             topology_changed=True,
+            active_topology_node_ids={node.id for node in topology.nodes} if message.replace else None,
         )
 
     async def _apply_properties(self, message: ApplyPropertiesCommand) -> AppliedPropertiesResult:
@@ -148,6 +149,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         await self._after_authoritative_changed(
             AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload, changes=changes),
             topology_changed=False,
+            active_topology_node_ids=None,
         )
         return AppliedPropertiesResult(changes=changes, full_property_coverage=full_coverage)
 
@@ -156,6 +158,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         await self._after_authoritative_changed(
             AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload),
             topology_changed=message.reason in {StateChangeReason.TOPOLOGY_PUSH, StateChangeReason.TOPOLOGY_SYNC},
+            active_topology_node_ids=None,
         )
 
     async def _after_authoritative_changed(
@@ -163,6 +166,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         event: AuthoritativeStateChangedEvent,
         *,
         topology_changed: bool,
+        active_topology_node_ids: Iterable[str | int] | None,
     ) -> None:
         affected = self._reconcile_overlay_from_message(event.message)
         motor_affected = self.motor.apply_authoritative_changes(
@@ -178,9 +182,9 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
                     now=asyncio.get_running_loop().time(),
                 )
             )
-        if topology_changed:
-            affected.update(self.overlay.clear_missing_nodes(self.state.nodes))
-            motor_affected.update(self.motor.clear_missing_nodes(self.state.nodes))
+        if topology_changed and active_topology_node_ids is not None:
+            affected.update(self.overlay.clear_missing_nodes(active_topology_node_ids))
+            motor_affected.update(self.motor.clear_missing_nodes(active_topology_node_ids))
         if affected:
             self._schedule_watchdog()
         if motor_affected:

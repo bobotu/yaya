@@ -51,6 +51,11 @@
     }
   },
   "entity": {
+    "button": {
+      "identify": {
+        "name": "Identify"
+      }
+    },
     "climate": {
       "air_conditioner": {
         "name": "Air conditioner {index}"

@@ -436,7 +436,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.visible_node("light-1").params["p"], False)
         self.assertFalse(gateway.has_pending_overlay("light-1", ["p"]))
 
-    async def test_topology_push_removes_missing_node_overlay(self) -> None:
+    async def test_topology_push_keeps_missing_node_overlay(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
                 request = parse_line(await reader.readline())
@@ -467,11 +467,11 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await gateway.set_node_props("light-1", {"p": True}, optimistic_props={"p": True})
             self.assertTrue(gateway.has_pending_overlay("light-1", ["p"]))
             await asyncio.sleep(0.1)
+            self.assertIn("light-1", gateway.state.nodes)
+            self.assertTrue(gateway.has_pending_overlay("light-1", ["p"]))
+            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
         finally:
             await gateway.close()
-
-        self.assertNotIn("light-1", gateway.state.nodes)
-        self.assertFalse(gateway.has_pending_overlay("light-1", ["p"]))
 
     async def test_connection_loss_clears_pending_overlay(self) -> None:
         gateway = YeelightProGateway("127.0.0.1", port=1)

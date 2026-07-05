@@ -13,6 +13,7 @@ import pytest
 pytest.importorskip("homeassistant")
 pytest.importorskip("pytest_homeassistant_custom_component")
 
+from homeassistant.components.button import ButtonDeviceClass
 from homeassistant.components.climate.const import ATTR_FAN_MODE, FAN_AUTO, FAN_HIGH, FAN_LOW, FAN_MEDIUM, HVACMode
 from homeassistant.components.cover import ATTR_POSITION, ATTR_TILT_POSITION
 from homeassistant.components.light import (
@@ -22,7 +23,7 @@ from homeassistant.components.light import (
     ATTR_TRANSITION,
     FLASH_SHORT,
 )
-from homeassistant.const import ATTR_ENTITY_ID, CONF_HOST, CONF_PORT, STATE_OFF, STATE_ON
+from homeassistant.const import ATTR_ENTITY_ID, CONF_HOST, CONF_PORT, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -37,6 +38,7 @@ from custom_components.yeelight_pro.const import (
     SWITCH_MODE_WIRELESS,
 )
 from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand
+from custom_components.yeelight_pro.entity import YeelightProGatewayUnavailableError
 from custom_components.yeelight_pro.helpers import node_unique_id
 from custom_components.yeelight_pro.session import (
     GatewaySessionState,
@@ -222,7 +224,18 @@ class FakeGateway:
     def replace_topology(self, fixture: dict[str, Any]) -> None:
         self.fixture = fixture
         self.state.apply_topology(fixture)
-        self._overlay.clear_missing_nodes(self.state.nodes)
+        self._overlay.clear_missing_nodes(self.state.topology_node_ids)
+        for listener in list(self._state_listeners):
+            listener(
+                StateSnapshotChanged(
+                    reason=StateChangeReason.TOPOLOGY_SYNC,
+                    message={"method": "gateway_sync.topology"},
+                )
+            )
+
+    def push_topology(self, fixture: dict[str, Any]) -> None:
+        self.fixture = fixture
+        self.state.apply_topology(fixture, replace=False)
         for listener in list(self._state_listeners):
             listener(
                 StateSnapshotChanged(
@@ -587,6 +600,106 @@ async def test_light_groups_are_imported_by_default(
         await hass.async_block_till_done()
 
 
+async def test_identify_buttons_are_only_created_for_light_nodes_and_groups(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        registry = er.async_get(hass)
+        button_unique_ids = {
+            item.unique_id
+            for item in er.async_entries_for_config_entry(registry, entry.entry_id)
+            if item.entity_id.startswith("button.")
+        }
+        assert button_unique_ids == {
+            node_unique_id("127.0.0.1:65443", "light-1", "identify"),
+            node_unique_id("127.0.0.1:65443", "group-node-1", "identify"),
+        }
+        assert gateway.commands == []
+
+        identify_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_identify")
+        identify_state = hass.states.get(identify_entity_id)
+        assert identify_state is not None
+        assert identify_state.attributes["device_class"] == ButtonDeviceClass.IDENTIFY
+        assert identify_state.attributes["friendly_name"] == "Kitchen light Identify"
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_identify_button_press_sends_light_blink_command(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        identify_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_identify")
+        group_identify_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_group-node-1_identify")
+
+        await hass.services.async_call(
+            "button",
+            "press",
+            {ATTR_ENTITY_ID: identify_entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert gateway.commands[-1].to_payload() == {
+            "id": "light-1",
+            "nt": 2,
+            "action": {"blink": {"repeat": 4, "type": "notify"}},
+        }
+        assert not gateway.has_pending_overlay("light-1")
+
+        await hass.services.async_call(
+            "button",
+            "press",
+            {ATTR_ENTITY_ID: group_identify_entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert gateway.commands[-1].to_payload() == {
+            "id": "group-node-1",
+            "nt": 4,
+            "action": {"blink": {"repeat": 4, "type": "notify"}},
+        }
+        assert not gateway.has_pending_overlay("group-node-1")
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_identify_button_press_fails_when_current_node_is_missing(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.yeelight_pro.button import YeelightProIdentifyButton
+
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        coordinator = entry.runtime_data
+        node = coordinator.node("light-1")
+        assert node is not None
+        button = YeelightProIdentifyButton(coordinator, node)
+        monkeypatch.setattr(coordinator, "node", lambda node_id: None)
+
+        with pytest.raises(YeelightProGatewayUnavailableError) as err:
+            await button.async_press()
+
+        assert err.value.translation_key == "gateway_unavailable"
+        assert gateway.commands == []
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
 async def test_import_room_filter_limits_created_entities(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
@@ -607,7 +720,7 @@ async def test_import_room_filter_limits_created_entities(
         await hass.async_block_till_done()
 
 
-async def test_import_room_filter_removes_stale_filtered_entities_and_device(
+async def test_import_room_filter_keeps_stale_filtered_registry_entries(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -637,16 +750,43 @@ async def test_import_room_filter_removes_stale_filtered_entities_and_device(
 
     try:
         for entity_id in stale_entity_ids:
-            assert registry.async_get(entity_id) is None
+            assert registry.async_get(entity_id) is not None
             assert hass.states.get(entity_id) is None
         for device_id in stale_device_ids:
-            assert device_registry.async_get(device_id) is None
+            assert device_registry.async_get(device_id) is not None
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
 
 
-async def test_topology_removal_reconciles_entities_and_device(
+async def test_topology_push_missing_node_keeps_entity_and_device(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        light_device = device_registry.async_get_device(identifiers={(DOMAIN, "127.0.0.1:65443:light-1")})
+        assert light_device is not None
+
+        updated_fixture = deepcopy(topology_fixture)
+        updated_fixture["nodes"] = [node for node in updated_fixture["nodes"] if node["id"] != "light-1"]
+        gateway.push_topology(updated_fixture)
+        await hass.async_block_till_done()
+
+        assert registry.async_get(light_entity_id) is not None
+        assert hass.states.get(light_entity_id) is not None
+        assert device_registry.async_get(light_device.id) is not None
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_full_topology_sync_missing_node_keeps_entity_unavailable(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -665,9 +805,11 @@ async def test_topology_removal_reconciles_entities_and_device(
         gateway.replace_topology(updated_fixture)
         await hass.async_block_till_done()
 
-        assert registry.async_get(light_entity_id) is None
-        assert hass.states.get(light_entity_id) is None
-        assert device_registry.async_get(light_device.id) is None
+        assert registry.async_get(light_entity_id) is not None
+        light_state = hass.states.get(light_entity_id)
+        assert light_state is not None
+        assert light_state.state == STATE_UNAVAILABLE
+        assert device_registry.async_get(light_device.id) is not None
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

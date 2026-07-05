@@ -52,6 +52,7 @@ class ApplyTopologyCommand:
     payload: Mapping[str, Any]
     reason: StateChangeReason
     message: Mapping[str, Any]
+    replace: bool = True
 
 
 @dataclass(frozen=True)

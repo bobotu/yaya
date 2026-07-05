@@ -102,9 +102,10 @@ custom **Integration** repository, install it, restart Home Assistant, and add
 
 Entities are created from topology-backed nodes only. Property pushes for
 unknown node ids are retained in diagnostics for debugging but are not imported
-into Home Assistant until a later topology sync identifies them. If a node
-disappears from topology, its existing entities remain registered but become
-unavailable.
+into Home Assistant until a later topology sync identifies them. Topology pushes
+are merged defensively; a node missing from a push is not treated as deleted. If
+an authoritative full topology sync no longer reports a previously known node,
+its existing entities remain registered but become unavailable.
 
 ## Modeling notes
 
