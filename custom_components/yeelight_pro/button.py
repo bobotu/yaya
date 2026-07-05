@@ -5,6 +5,7 @@ from typing import Any
 from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
@@ -33,6 +34,7 @@ async def async_setup_entry(
 
 class YeelightProIdentifyButton(YeelightProEntity, ButtonEntity):
     _attr_device_class = ButtonDeviceClass.IDENTIFY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "identify"
 
     def __init__(self, coordinator: YeelightProCoordinator, node: Any) -> None:

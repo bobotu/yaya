@@ -626,6 +626,7 @@ async def test_identify_buttons_are_only_created_for_light_nodes_and_groups(
         assert identify_state is not None
         assert identify_state.attributes["device_class"] == ButtonDeviceClass.IDENTIFY
         assert identify_state.attributes["friendly_name"] == "Kitchen light Identify"
+        assert registry.async_get(identify_entity_id).entity_category is EntityCategory.DIAGNOSTIC
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
