@@ -8,15 +8,16 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.const import DEFAULT_VERSION, GATEWAY_CONTROL_PORT
-from ..core.exceptions import (
+from ...core.const import DEFAULT_VERSION, GATEWAY_CONTROL_PORT
+from ...core.exceptions import (
     ConnectionClosed,
     GatewayErrorResponse,
     ProtocolFrameTooLarge,
     RequestTimeout,
     YeelightProError,
 )
-from ..core.protocol import build_request, parse_line
+from ...core.protocol import build_request, parse_line
+from ..actors.base import create_actor_task
 
 JSONDict = dict[str, Any]
 PushListener = Callable[[Mapping[str, Any]], Awaitable[None] | None]
@@ -59,8 +60,8 @@ class GatewayRPC:
         self._reader_task: asyncio.Task[None] | None = None
         self._writer_task: asyncio.Task[None] | None = None
         self._dispatch_task: asyncio.Task[None] | None = None
-        self._write_queue: asyncio.Queue[_QueuedRequest | None] = asyncio.Queue()
-        self._push_queue: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
+        self._write_queue: asyncio.Queue[_QueuedRequest] | None = None
+        self._push_queue: asyncio.Queue[Mapping[str, Any]] | None = None
         self._pending: dict[int, asyncio.Future[JSONDict]] = {}
         self._listeners: list[PushListener] = []
         self._next_id = 0
@@ -92,10 +93,11 @@ class GatewayRPC:
     async def connect(self) -> None:
         if self.is_connected:
             return
+        await self._shutdown_connection(ConnectionClosed("reconnecting"), record_error=False)
         self._closing = False
         self.last_disconnect_error = None
         try:
-            self._reader, self._writer = await asyncio.wait_for(
+            reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(
                     self.host,
                     self.port,
@@ -104,52 +106,32 @@ class GatewayRPC:
                 timeout=self.request_timeout,
             )
         except TimeoutError as exc:
+            self._mark_disconnected(RequestTimeout(f"timed out connecting to {self.host}:{self.port}"))
             raise RequestTimeout(f"timed out connecting to {self.host}:{self.port}") from exc
+        self._reader = reader
+        self._writer = writer
+        self._write_queue = asyncio.Queue()
+        self._push_queue = asyncio.Queue()
         self._disconnected.clear()
-        self._reader_task = asyncio.create_task(
-            self._read_loop(),
+        self._reader_task = create_actor_task(
+            self._read_loop(reader, writer, self._push_queue),
             name=f"yeelight-pro-rpc-{self.host}:{self.port}",
         )
-        self._writer_task = asyncio.create_task(
-            self._write_loop(),
+        self._writer_task = create_actor_task(
+            self._write_loop(self._write_queue, writer),
             name=f"yeelight-pro-rpc-writer-{self.host}:{self.port}",
         )
-        self._dispatch_task = asyncio.create_task(
-            self._dispatch_loop(),
+        self._dispatch_task = create_actor_task(
+            self._dispatch_loop(self._push_queue),
             name=f"yeelight-pro-rpc-dispatch-{self.host}:{self.port}",
         )
 
     async def close(self) -> None:
         self._closing = True
-        if self._writer is not None:
-            await self._close_writer(self._writer)
-
-        self._write_queue.put_nowait(None)
-        self._push_queue.put_nowait(None)
-        for task in (self._reader_task, self._writer_task, self._dispatch_task):
-            if task is not None and task is not asyncio.current_task():
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-
-        self._mark_disconnected(ConnectionClosed("client closed"))
+        await self._shutdown_connection(ConnectionClosed("client closed"))
 
     async def wait_closed(self) -> None:
         await self._disconnected.wait()
-
-    async def run_forever(self) -> None:
-        self._closing = False
-        while not self._closing:
-            try:
-                await self.connect()
-                await self.wait_closed()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - reconnect loop must survive I/O failures.
-                self._mark_disconnected(exc)
-
-            if not self._closing:
-                await asyncio.sleep(self.reconnect_delay)
 
     async def request(
         self,
@@ -161,37 +143,41 @@ class GatewayRPC:
     ) -> JSONDict:
         if self._writer is None or self._writer.is_closing() or self._writer_task is None:
             raise ConnectionClosed("gateway is not connected")
+        write_queue = self._write_queue
+        if write_queue is None:
+            raise ConnectionClosed("gateway is not connected")
 
         request_id = self._allocate_request_id()
         loop = asyncio.get_running_loop()
         future: asyncio.Future[JSONDict] = loop.create_future()
         self._pending[request_id] = future
-        self._write_queue.put_nowait(_QueuedRequest(request_id, method, payload, future, on_written))
+        write_queue.put_nowait(_QueuedRequest(request_id, method, payload, future, on_written))
 
         try:
             return await asyncio.wait_for(future, timeout or self.request_timeout)
         except TimeoutError as exc:
             self._pending.pop(request_id, None)
-            error = RequestTimeout(f"timed out waiting for {method}")
-            await self._fail_connection(error)
-            raise error from exc
+            timeout_error = RequestTimeout(f"timed out waiting for {method}")
+            await self._shutdown_connection(timeout_error)
+            raise timeout_error from exc
         except (ConnectionError, OSError) as exc:
             self._pending.pop(request_id, None)
-            error = ConnectionClosed(str(exc))
-            await self._fail_connection(error)
-            raise error from exc
+            connection_error = ConnectionClosed(str(exc))
+            await self._shutdown_connection(connection_error)
+            raise connection_error from exc
 
-    async def _write_loop(self) -> None:
+    async def _write_loop(
+        self,
+        write_queue: asyncio.Queue[_QueuedRequest],
+        writer: asyncio.StreamWriter,
+    ) -> None:
         try:
             while True:
-                queued = await self._write_queue.get()
-                if queued is None:
-                    return
+                queued = await write_queue.get()
                 if queued.future.done():
                     self._pending.pop(queued.request_id, None)
                     continue
-                writer = self._writer
-                if writer is None or writer.is_closing():
+                if writer.is_closing():
                     error = ConnectionClosed("gateway is not connected")
                     self._pending.pop(queued.request_id, None)
                     if not queued.future.done():
@@ -217,18 +203,21 @@ class GatewayRPC:
                     self._pending.pop(queued.request_id, None)
                     if not queued.future.done():
                         queued.future.set_exception(error)
-                    await self._fail_connection(error)
+                    await self._shutdown_connection(error)
                     return
         except asyncio.CancelledError:
             raise
 
-    async def _read_loop(self) -> None:
-        assert self._reader is not None
-        writer = self._writer
+    async def _read_loop(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        push_queue: asyncio.Queue[Mapping[str, Any]],
+    ) -> None:
         try:
             while True:
                 try:
-                    line = await self._reader.readuntil(b"\r\n")
+                    line = await reader.readuntil(b"\r\n")
                 except asyncio.IncompleteReadError as exc:
                     raise ConnectionClosed("gateway closed the connection") from exc
                 except asyncio.LimitOverrunError as exc:
@@ -247,36 +236,33 @@ class GatewayRPC:
                             future.set_result(message)
                     continue
 
-                self._push_queue.put_nowait(message)
+                push_queue.put_nowait(message)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - wake all pending callers.
-            self._mark_disconnected(exc)
-        finally:
-            if writer is not None:
-                await self._close_writer(writer)
-            self._disconnected.set()
+            await self._shutdown_connection(exc)
 
-    async def _dispatch_loop(self) -> None:
+    async def _dispatch_loop(self, push_queue: asyncio.Queue[Mapping[str, Any]]) -> None:
         try:
             while True:
-                message = await self._push_queue.get()
-                if message is None:
-                    return
+                message = await push_queue.get()
                 await self._dispatch_push(message)
         except asyncio.CancelledError:
             raise
 
     async def _dispatch_push(self, message: Mapping[str, Any]) -> None:
         for listener in list(self._listeners):
-            result = listener(message)
-            if inspect.isawaitable(result):
-                await result
+            try:
+                result = listener(message)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001 - listeners must not kill push dispatch.
+                _LOGGER.exception("Gateway RPC push listener failed")
 
-    def _mark_disconnected(self, exc: BaseException) -> None:
+    def _mark_disconnected(self, exc: BaseException, *, record_error: bool = True) -> None:
         self._reader = None
         self._writer = None
-        if not self._disconnected.is_set() or self.last_disconnect_error is None:
+        if record_error and (not self._disconnected.is_set() or self.last_disconnect_error is None):
             self.last_disconnect_error = exc
         self._disconnected.set()
         for request_id, future in list(self._pending.items()):
@@ -287,21 +273,24 @@ class GatewayRPC:
                 else:
                     future.set_exception(ConnectionClosed(str(exc)))
 
-    async def _fail_connection(self, exc: BaseException) -> None:
+    async def _shutdown_connection(self, exc: BaseException, *, record_error: bool = True) -> None:
         writer = self._writer
         tasks = (self._reader_task, self._writer_task, self._dispatch_task)
-        self._mark_disconnected(exc)
+        self._mark_disconnected(exc, record_error=record_error)
 
         if writer is not None and not writer.is_closing():
             await self._close_writer(writer)
 
-        self._write_queue.put_nowait(None)
-        self._push_queue.put_nowait(None)
         for task in tasks:
             if task is not None and task is not asyncio.current_task():
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+        self._reader_task = None
+        self._writer_task = None
+        self._dispatch_task = None
+        self._write_queue = None
+        self._push_queue = None
 
     async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
         if not writer.is_closing():

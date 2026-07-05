@@ -23,7 +23,7 @@ from .core.commands import BlinkType
 from .core.devices import LightDevice
 from .core.devices.light import MAX_COLOR_TEMP_KELVIN, MIN_COLOR_TEMP_KELVIN
 from .core.topology import DeviceType
-from .entity import YeelightProEntity, async_call_gateway
+from .entity import YeelightProEntity, async_call_gateway, async_set_node_props
 from .helpers import light_device_type
 from .platform import async_add_dynamic_entities
 
@@ -50,6 +50,10 @@ class YeelightProLight(YeelightProEntity, LightEntity):
         self._attr_min_color_temp_kelvin = MIN_COLOR_TEMP_KELVIN
         self._attr_max_color_temp_kelvin = MAX_COLOR_TEMP_KELVIN
         self._attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
+
+    @property
+    def optimistic_properties(self) -> tuple[str, ...]:
+        return ("p", "l", "ct", "c")
 
     @property
     def supported_color_modes(self) -> set[ColorMode]:
@@ -118,23 +122,29 @@ class YeelightProLight(YeelightProEntity, LightEntity):
         if flash is not None:
             await async_call_gateway(device.blink(blink_type=_flash_to_blink_type(flash)))
             return
-        await async_call_gateway(
-            device.turn_on(
-                brightness=brightness_percent,
-                color_temperature=color_temperature,
-                color=color,
-                duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION)),
-            )
+        props: dict[str, Any] = {"p": True}
+        if brightness_percent is not None:
+            props["l"] = brightness_percent
+        if color_temperature is not None:
+            props["ct"] = color_temperature
+        if color is not None:
+            props["c"] = color
+        await async_set_node_props(
+            self.coordinator,
+            node,
+            props,
+            duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION)),
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         node = self.node
         if node is None:
             return
-        await async_call_gateway(
-            LightDevice(node, self.coordinator.gateway).turn_off(
-                duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION))
-            )
+        await async_set_node_props(
+            self.coordinator,
+            node,
+            {"p": False},
+            duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION)),
         )
 
 

@@ -2,12 +2,26 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Any
 
 from .const import DEFAULT_VERSION
 from .exceptions import ProtocolError
 
 JSONDict = dict[str, Any]
+
+
+class GatewayMethod(StrEnum):
+    GET_TOPOLOGY = "gateway_get.topology"
+    GET_NODE = "gateway_get.node"
+    GET_GROUP = "gateway_get.group"
+    GET_ROOM = "gateway_get.room"
+    GET_SCENE = "gateway_get.scene"
+    SET_PROP = "gateway_set.prop"
+    SET_EVENT = "gateway_set.event"
+    POST_PROP = "gateway_post.prop"
+    POST_TOPOLOGY = "gateway_post.topology"
+    POST_EVENT = "gateway_post.event"
 
 
 def build_request(

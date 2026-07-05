@@ -44,7 +44,7 @@ from .exceptions import (
     RequestTimeout,
     YeelightProError,
 )
-from .protocol import build_request, normalize_payload, parse_line
+from .protocol import GatewayMethod, build_request, normalize_payload, parse_line
 from .topology import DeviceType, NodeType, Topology, TopologyNode
 from .updates import PropertyChange
 
@@ -64,6 +64,7 @@ __all__ = [
     "DreamCurtainDevice",
     "GatewayErrorResponse",
     "GatewayEvent",
+    "GatewayMethod",
     "HumanLightSensorDevice",
     "HumitureSensorDevice",
     "KnobDevice",

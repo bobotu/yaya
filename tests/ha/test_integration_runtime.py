@@ -38,7 +38,13 @@ from custom_components.yeelight_pro.const import (
 )
 from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand
 from custom_components.yeelight_pro.helpers import node_unique_id
-from custom_components.yeelight_pro.session.state import GatewayState
+from custom_components.yeelight_pro.session import (
+    GatewaySessionState,
+    SessionStatusChanged,
+    StateChangeReason,
+    StateSnapshotChanged,
+)
+from custom_components.yeelight_pro.session.model import GatewayState, OptimisticStateOverlay
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -55,8 +61,10 @@ class FakeGateway:
         self.commands: list[NodeCommand] = []
         self.refreshed_node_ids: list[str | int] = []
         self.sync_kwargs: list[dict[str, Any]] = []
+        self._overlay = OptimisticStateOverlay()
         self._event_listeners = []
         self._property_listeners = []
+        self._session_listeners = []
         self._state_listeners = []
         self._closed = asyncio.Event()
 
@@ -67,18 +75,35 @@ class FakeGateway:
     async def connect(self) -> None:
         self.connected = True
         self._closed.clear()
+        previous = self.session_state
+        self.session_state = GatewaySessionState.CONNECTING.value
+        self._notify_session(GatewaySessionState.CONNECTING, previous=previous)
 
     async def close(self) -> None:
+        previous = self.session_state
         self.connected = False
+        self.session_state = GatewaySessionState.DISCONNECTED.value
+        self._notify_session(GatewaySessionState.DISCONNECTED, previous=previous)
         self._closed.set()
 
     async def wait_closed(self) -> None:
         await self._closed.wait()
 
+    async def start(self, **kwargs: Any) -> None:
+        await self.connect()
+        await self.sync(**kwargs)
+
+    async def stop(self) -> None:
+        await self.close()
+
     async def sync(self, **kwargs: Any) -> None:
         self.sync_kwargs.append(kwargs)
+        self._overlay.clear_all()
         self.state.apply_topology(self.fixture)
         self.last_full_sync_source = "poll"
+        previous = self.session_state
+        self.session_state = GatewaySessionState.READY.value
+        self._notify_session(GatewaySessionState.READY, previous=previous)
 
     async def refresh_node(self, node_id: str | int) -> dict[str, Any]:
         self.refreshed_node_ids.append(node_id)
@@ -95,9 +120,27 @@ class FakeGateway:
         *,
         nt: int = 2,
         duration: int | None = None,
+        optimistic_props: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.commands.append(NodeCommand(id=node_id, nt=nt, props=props, duration=duration))
+        if optimistic_props:
+            self._overlay.set_props(node_id, optimistic_props, now=asyncio.get_running_loop().time())
+            self._notify_state({"method": "gateway_overlay.optimistic"})
         return {"result": "ok"}
+
+    def visible_node(self, node_id: str | int) -> Any:
+        node = self.state.nodes.get(node_id)
+        return None if node is None else self._overlay.visible_node(node, now=asyncio.get_running_loop().time())
+
+    def visible_nodes(self) -> list[Any]:
+        now = asyncio.get_running_loop().time()
+        return [self._overlay.visible_node(node, now=now) for node in self.state.nodes.values()]
+
+    def has_pending_overlay(self, node_id: str | int, props: Any = None) -> bool:
+        return self._overlay.has_pending(node_id, props)
+
+    def optimistic_diagnostics(self) -> dict[str, Any]:
+        return self._overlay.diagnostics(now=asyncio.get_running_loop().time())
 
     def add_event_listener(self, listener: Any) -> Any:
         self._event_listeners.append(listener)
@@ -112,6 +155,14 @@ class FakeGateway:
 
         def remove() -> None:
             self._property_listeners.remove(listener)
+
+        return remove
+
+    def add_session_listener(self, listener: Any) -> Any:
+        self._session_listeners.append(listener)
+
+        def remove() -> None:
+            self._session_listeners.remove(listener)
 
         return remove
 
@@ -140,14 +191,42 @@ class FakeGateway:
                 ],
             }
         )
+        self._overlay.reconcile_node_props(node_id, params)
+        self._notify_state({"method": "gateway_post.prop"})
+
+    def _notify_state(self, message: dict[str, Any]) -> None:
+        event = StateSnapshotChanged(reason=_state_reason(message), message=message)
         for listener in list(self._state_listeners):
-            listener({"method": "gateway_post.prop"})
+            listener(event)
+
+    def _notify_session(
+        self,
+        current: GatewaySessionState,
+        *,
+        previous: str | GatewaySessionState | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        if previous is None:
+            previous_state = current
+        elif isinstance(previous, GatewaySessionState):
+            previous_state = previous
+        else:
+            previous_state = GatewaySessionState(previous)
+        event = SessionStatusChanged(previous=previous_state, current=current, error=error)
+        for listener in list(self._session_listeners):
+            listener(event)
 
     def replace_topology(self, fixture: dict[str, Any]) -> None:
         self.fixture = fixture
         self.state.apply_topology(fixture)
+        self._overlay.clear_missing_nodes(self.state.nodes)
         for listener in list(self._state_listeners):
-            listener({"method": "gateway_post.topology"})
+            listener(
+                StateSnapshotChanged(
+                    reason=StateChangeReason.TOPOLOGY_PUSH,
+                    message={"method": "gateway_post.topology"},
+                )
+            )
 
 
 @pytest.fixture
@@ -166,7 +245,7 @@ def topology_fixture() -> dict[str, Any]:
     return fixture
 
 
-async def test_relay_switch_service_waits_for_gateway_state(
+async def test_relay_switch_service_uses_optimistic_state_until_gateway_push(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -188,11 +267,43 @@ async def test_relay_switch_service_waits_for_gateway_state(
         await hass.async_block_till_done()
 
         assert gateway.commands[-1].to_payload()["set"] == {"2-sp": False}
-        assert hass.states.get(switch_entity_id).state == STATE_ON
+        assert hass.states.get(switch_entity_id).state == STATE_OFF
+        assert gateway.has_pending_overlay("switch-1", ["2-sp"])
 
         gateway.update_node_params("switch-1", {"2-sp": False})
         await hass.async_block_till_done()
         assert hass.states.get(switch_entity_id).state == "off"
+        assert not gateway.has_pending_overlay("switch-1", ["2-sp"])
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_relay_switch_conflicting_gateway_push_overrides_optimistic_state(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        switch_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_switch-1_relay_2")
+
+        await hass.services.async_call(
+            "switch",
+            "turn_off",
+            {ATTR_ENTITY_ID: switch_entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(switch_entity_id).state == STATE_OFF
+        assert gateway.has_pending_overlay("switch-1", ["2-sp"])
+
+        gateway.update_node_params("switch-1", {"2-sp": True})
+        await hass.async_block_till_done()
+
+        assert hass.states.get(switch_entity_id).state == STATE_ON
+        assert not gateway.has_pending_overlay("switch-1", ["2-sp"])
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -587,6 +698,10 @@ async def test_light_service_maps_transition_and_flash(
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"p": True, "l": 50, "ct": 3000}
         assert gateway.commands[-1].to_payload()["duration"] == 1500
+        state = hass.states.get(light_entity_id)
+        assert state.state == STATE_ON
+        assert state.attributes["brightness"] == 128
+        assert state.attributes["color_temp_kelvin"] == 3000
 
         await hass.services.async_call(
             "light",
@@ -597,6 +712,7 @@ async def test_light_service_maps_transition_and_flash(
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"p": False}
         assert gateway.commands[-1].to_payload()["duration"] == 2000
+        assert hass.states.get(light_entity_id).state == STATE_OFF
 
         await hass.services.async_call(
             "light",
@@ -606,6 +722,72 @@ async def test_light_service_maps_transition_and_flash(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["action"] == {"blink": {"repeat": 4, "type": "urgent"}}
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_light_service_optimistic_state_reconciles_with_conflicting_push(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {
+                ATTR_ENTITY_ID: light_entity_id,
+                ATTR_BRIGHTNESS: 128,
+                ATTR_COLOR_TEMP_KELVIN: 3000,
+            },
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+        state = hass.states.get(light_entity_id)
+        assert state.state == STATE_ON
+        assert state.attributes["brightness"] == 128
+        assert state.attributes["color_temp_kelvin"] == 3000
+        assert gateway.has_pending_overlay("light-1", ["p", "l", "ct"])
+
+        gateway.update_node_params("light-1", {"p": True, "l": 80, "ct": 4000})
+        await hass.async_block_till_done()
+
+        state = hass.states.get(light_entity_id)
+        assert state.state == STATE_ON
+        assert state.attributes["brightness"] == 204
+        assert state.attributes["color_temp_kelvin"] == 4000
+        assert not gateway.has_pending_overlay("light-1", ["p", "l", "ct"])
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_light_flash_command_does_not_create_optimistic_overlay(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {ATTR_ENTITY_ID: light_entity_id, ATTR_FLASH: FLASH_SHORT},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+        assert gateway.commands[-1].to_payload()["action"] == {"blink": {"repeat": 4, "type": "urgent"}}
+        assert not gateway.has_pending_overlay("light-1")
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -718,6 +900,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acp": True, "1-acm": 8}
+        assert hass.states.get(climate_entity_id).state == HVACMode.HEAT
 
         await hass.services.async_call(
             "climate",
@@ -727,6 +910,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acp": True, "1-acm": 2}
+        assert hass.states.get(climate_entity_id).state == HVACMode.DRY
 
         await hass.services.async_call(
             "climate",
@@ -736,6 +920,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acf": 0}
+        assert hass.states.get(climate_entity_id).attributes["fan_mode"] == FAN_AUTO
 
         await hass.services.async_call(
             "climate",
@@ -745,6 +930,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acf": 1}
+        assert hass.states.get(climate_entity_id).attributes["fan_mode"] == FAN_HIGH
 
         await hass.services.async_call(
             "switch",
@@ -754,6 +940,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acrc": False}
+        assert hass.states.get(remote_entity_id).state == STATE_OFF
 
         await hass.services.async_call(
             "number",
@@ -763,6 +950,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acdfltr": 64}
+        assert float(hass.states.get(deflector_entity_id).state) == 64.0
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -858,6 +1046,7 @@ async def test_bath_heater_standard_platform_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"tgt": 40}
+        assert hass.states.get(climate_entity_id).attributes["temperature"] == 40.0
 
         await hass.services.async_call(
             "fan",
@@ -867,6 +1056,7 @@ async def test_bath_heater_standard_platform_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"ve": 3}
+        assert hass.states.get(fan_entity_id).attributes["percentage"] == 100
 
         await hass.services.async_call(
             "number",
@@ -876,6 +1066,7 @@ async def test_bath_heater_standard_platform_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"he": 1}
+        assert float(hass.states.get(heat_number_entity_id).state) == 1.0
 
         await hass.services.async_call(
             "select",
@@ -885,6 +1076,62 @@ async def test_bath_heater_standard_platform_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"bhm": 4}
+        assert hass.states.get(mode_entity_id).state == "mode_4"
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_bath_heater_config_entities_use_optimistic_state_until_push(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        fan_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_bath-1_ve")
+        heat_number_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_bath-1_he")
+        mode_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_bath-1_bath_mode")
+
+        await hass.services.async_call(
+            "fan",
+            "set_percentage",
+            {ATTR_ENTITY_ID: fan_entity_id, "percentage": 100},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(fan_entity_id).attributes["percentage"] == 100
+        assert gateway.has_pending_overlay("bath-1", ["ve"])
+        gateway.update_node_params("bath-1", {"ve": 3})
+        await hass.async_block_till_done()
+        assert not gateway.has_pending_overlay("bath-1", ["ve"])
+
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {ATTR_ENTITY_ID: heat_number_entity_id, "value": 1},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert float(hass.states.get(heat_number_entity_id).state) == 1.0
+        assert gateway.has_pending_overlay("bath-1", ["he"])
+        gateway.update_node_params("bath-1", {"he": 1})
+        await hass.async_block_till_done()
+        assert not gateway.has_pending_overlay("bath-1", ["he"])
+
+        await hass.services.async_call(
+            "select",
+            "select_option",
+            {ATTR_ENTITY_ID: mode_entity_id, "option": "mode_4"},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(mode_entity_id).state == "mode_4"
+        assert gateway.has_pending_overlay("bath-1", ["bhm"])
+        gateway.update_node_params("bath-1", {"bhm": 4})
+        await hass.async_block_till_done()
+        assert not gateway.has_pending_overlay("bath-1", ["bhm"])
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -1002,6 +1249,8 @@ async def test_cover_services_send_standard_commands(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"tp": 66}
+        assert not gateway.has_pending_overlay("curtain-1")
+        assert hass.states.get(cover_entity_id).attributes["current_position"] == 20
 
         await hass.services.async_call(
             "cover",
@@ -1011,6 +1260,7 @@ async def test_cover_services_send_standard_commands(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["action"] == {"motorAdjust": {"type": "pause"}}
+        assert not gateway.has_pending_overlay("curtain-1")
 
         await hass.services.async_call(
             "cover",
@@ -1020,6 +1270,7 @@ async def test_cover_services_send_standard_commands(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"tra": 90}
+        assert not gateway.has_pending_overlay("curtain-1")
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -1056,6 +1307,17 @@ def _entity_id_for_unique_id(hass: HomeAssistant, entry_id: str, unique_id_suffi
         if entry.unique_id.endswith(unique_id_suffix):
             return entry.entity_id
     raise AssertionError(f"entity with unique id suffix {unique_id_suffix} not found")
+
+
+def _state_reason(message: dict[str, Any]) -> StateChangeReason:
+    method = message.get("method")
+    if method == "gateway_post.topology":
+        return StateChangeReason.TOPOLOGY_PUSH
+    if method == "gateway_post.prop":
+        return StateChangeReason.PROPERTY_PUSH
+    if method == "gateway_overlay.optimistic":
+        return StateChangeReason.OPTIMISTIC_UPDATE
+    return StateChangeReason.GENERIC_PUSH
 
 
 def _trigger_info() -> dict[str, Any]:

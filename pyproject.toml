@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yeelight-pro"
-version = "0.1.2"
+version = "0.2.0"
 description = "Async local control library for Yeelight Pro gateways"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,8 +22,13 @@ classifiers = [
 
 [dependency-groups]
 dev = [
+    "coverage[toml]>=7.6",
+    "mypy>=1.17",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
+]
+ha-test = [
+    "pytest-homeassistant-custom-component==0.13.316 ; python_full_version >= '3.13.2'",
 ]
 
 [tool.setuptools.packages.find]
@@ -47,3 +52,15 @@ select = ["B", "E", "F", "I", "UP"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["yeelight_pro"]
+
+[tool.mypy]
+python_version = "3.13"
+follow_imports = "silent"
+explicit_package_bases = true
+files = [
+    "custom_components/yeelight_pro/session/actors",
+    "custom_components/yeelight_pro/session/messages",
+    "custom_components/yeelight_pro/session/model",
+    "custom_components/yeelight_pro/session/runtime",
+    "custom_components/yeelight_pro/session/transport",
+]

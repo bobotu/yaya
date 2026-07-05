@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
 from .core.topology import DeviceType
-from .entity import YeelightProEntity, async_call_gateway
+from .entity import YeelightProEntity, async_set_node_props
 from .helpers import device_type
 from .platform import async_add_dynamic_entities
 
@@ -51,6 +51,10 @@ class YeelightProBathModeSelect(YeelightProEntity, SelectEntity):
         super().__init__(coordinator, node, "bath_mode")
 
     @property
+    def optimistic_properties(self) -> tuple[str, ...]:
+        return ("bhm",)
+
+    @property
     def current_option(self) -> str | None:
         node = self.node
         if node is None:
@@ -64,6 +68,4 @@ class YeelightProBathModeSelect(YeelightProEntity, SelectEntity):
         node = self.node
         if node is None:
             return
-        await async_call_gateway(
-            self.coordinator.gateway.set_node_props(node.id, {"bhm": BATH_MODE_OPTIONS[option]}, nt=node.nt)
-        )
+        await async_set_node_props(self.coordinator, node, {"bhm": BATH_MODE_OPTIONS[option]})

@@ -15,7 +15,7 @@ from yeelight_pro.core import (  # noqa: E402
     parse_discovery_response,
     parse_line,
 )
-from yeelight_pro.session.state import GatewayState  # noqa: E402
+from yeelight_pro.session.model import GatewayState, OptimisticStateOverlay  # noqa: E402
 
 
 class ProtocolAndStateTests(unittest.TestCase):
@@ -61,6 +61,43 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(state.nodes["curtain-1"].params["cp"], 25)
         self.assertEqual(state.nodes["curtain-1"].params["tra"], 45)
 
+    def test_full_property_coverage_requires_full_snapshot_marker(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [
+                    {"id": "light-1", "nt": 2, "type": 3},
+                    {"id": "light-2", "nt": 2, "type": 3},
+                ],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+
+        self.assertFalse(
+            state.full_property_coverage(
+                {
+                    "method": "gateway_post.prop",
+                    "nodes": [
+                        {"id": "light-1", "params": {"p": True}},
+                        {"id": "light-2", "params": {"p": False}},
+                    ],
+                }
+            )
+        )
+        self.assertTrue(
+            state.full_property_coverage(
+                {
+                    "method": "gateway_post.prop",
+                    "nodes": [
+                        {"id": "light-1", "params": {"p": True}, "o": True},
+                        {"id": "light-2", "params": {"p": False}, "o": True},
+                    ],
+                }
+            )
+        )
+
     def test_state_keeps_unknown_property_nodes_out_of_topology_nodes(self) -> None:
         state = GatewayState()
         state.apply_topology(
@@ -97,6 +134,31 @@ class ProtocolAndStateTests(unittest.TestCase):
         unknown = state.unknown_property_nodes["raw-light-1"]
         self.assertEqual(unknown.property_type, 3)
         self.assertEqual(unknown.params, {"p": True, "l": 80, "ct": 4000})
+
+    def test_state_updates_unknown_property_node_summary(self) -> None:
+        state = GatewayState()
+        state.apply_properties(
+            {
+                "method": "gateway_post.prop",
+                "nodes": [{"id": "raw-light-1", "nt": "2", "pt": "3", "params": {"p": True}}],
+            }
+        )
+        state.apply_properties(
+            {
+                "method": "gateway_post.prop",
+                "nodes": [{"id": "raw-light-1", "nt": 2, "pt": "bad", "params": {"l": 42}}],
+            }
+        )
+
+        unknown = state.unknown_property_nodes["raw-light-1"]
+        self.assertEqual(unknown.count, 2)
+        self.assertEqual(unknown.nt, 2)
+        self.assertEqual(unknown.property_type, None)
+        self.assertEqual(unknown.params, {"l": 42})
+        self.assertEqual(
+            state.unknown_summary(),
+            {"count": 1, "by_shape": {"nt=2;pt=None;params=l": 1}},
+        )
 
     def test_topology_claims_previously_unknown_property_node(self) -> None:
         state = GatewayState()
@@ -141,6 +203,75 @@ class ProtocolAndStateTests(unittest.TestCase):
         )
 
         self.assertEqual(state.room_id_for_node(state.nodes["light-1"]), "room-1")
+
+    def test_room_name_looks_up_string_and_integer_ids(self) -> None:
+        state = GatewayState()
+        state.apply_topology({"nodes": [], "rooms": [{"id": 1, "n": "Kitchen"}, {"id": "2", "name": "Office"}]})
+
+        self.assertEqual(state.room_name("1"), "Kitchen")
+        self.assertEqual(state.room_name(2), "Office")
+        self.assertIsNone(state.room_name("bad"))
+        self.assertIsNone(state.room_name(None))
+
+    def test_optimistic_overlay_projects_reconciles_and_expires(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False, "l": 80}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        overlay = OptimisticStateOverlay(ttl=5.0)
+
+        overlay.set_props("light-1", {"p": True}, now=10.0)
+        visible = overlay.visible_node(state.nodes["light-1"], now=11.0)
+        self.assertEqual(visible.params["p"], True)
+        self.assertEqual(state.nodes["light-1"].params["p"], False)
+        self.assertTrue(overlay.has_pending("light-1", ["p"]))
+
+        overlay.set_props("light-1", {"p": False}, now=12.0)
+        visible = overlay.visible_node(state.nodes["light-1"], now=12.1)
+        self.assertEqual(visible.params["p"], False)
+
+        affected = overlay.reconcile_node_props("light-1", {"p": False})
+        self.assertEqual(affected, {"light-1"})
+        self.assertFalse(overlay.has_pending("light-1", ["p"]))
+
+        overlay.set_props("light-1", {"l": 20}, now=20.0)
+        self.assertEqual(overlay.expire(now=24.9), set())
+        self.assertEqual(overlay.expire(now=25.0), {"light-1"})
+        self.assertFalse(overlay.has_pending("light-1"))
+
+    def test_optimistic_overlay_clears_by_node_and_missing_topology(self) -> None:
+        overlay = OptimisticStateOverlay(ttl=5.0)
+
+        self.assertEqual(overlay.set_props("light-1", {"p": True, "l": 42}, now=1.0), {"light-1"})
+        self.assertEqual(overlay.set_props("switch-1", {"1-sp": False}, now=1.0), {"switch-1"})
+        self.assertTrue(overlay.has_pending("light-1"))
+        self.assertTrue(overlay.has_pending("switch-1"))
+
+        self.assertEqual(overlay.clear_props("light-1", ["p"]), {"light-1"})
+        self.assertFalse(overlay.has_pending("light-1", ["p"]))
+        self.assertTrue(overlay.has_pending("light-1", ["l"]))
+
+        self.assertEqual(overlay.clear_missing_nodes(["switch-1"]), {"light-1"})
+        self.assertFalse(overlay.has_pending("light-1"))
+        self.assertTrue(overlay.has_pending("switch-1"))
+
+        self.assertEqual(overlay.clear_all(), {"switch-1"})
+        self.assertFalse(overlay.has_pending("switch-1"))
+
+    def test_optimistic_overlay_ignores_invalid_node_and_property_keys(self) -> None:
+        overlay = OptimisticStateOverlay(ttl=5.0)
+
+        self.assertEqual(overlay.set_props(True, {"p": True}, now=1.0), set())
+        self.assertEqual(overlay.set_props("light-1", {"p": True, 1: "bad"}, now=1.0), {"light-1"})
+        self.assertTrue(overlay.has_pending("light-1", ["p"]))
+        self.assertFalse(overlay.has_pending("light-1", ["1"]))
+        self.assertEqual(overlay.reconcile_node_props(True, {"p": True}), set())
+        self.assertEqual(overlay.clear_node("light-1"), {"light-1"})
 
     def test_gateway_event_normalization_for_programmable_switches(self) -> None:
         events = list(

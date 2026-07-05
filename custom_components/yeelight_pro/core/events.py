@@ -4,6 +4,8 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .protocol import GatewayMethod
+
 
 @dataclass(frozen=True)
 class GatewayEvent:
@@ -69,7 +71,7 @@ class GatewayEvent:
 
 
 def iter_gateway_events(message: Mapping[str, Any]) -> Iterator[GatewayEvent]:
-    if message.get("method") != "gateway_post.event":
+    if message.get("method") != GatewayMethod.POST_EVENT:
         return
 
     nodes = message.get("nodes")

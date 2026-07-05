@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from ..core.protocol import list_payload
-from ..core.topology import Topology, TopologyNode
-from ..core.updates import PropertyChange
+from ...core.protocol import GatewayMethod, list_payload
+from ...core.topology import Topology, TopologyNode
+from ...core.updates import PropertyChange
 
 
 @dataclass
@@ -62,31 +62,25 @@ class GatewayState:
                 )
             nodes[node.id] = node
         self.nodes = nodes
-        self.groups = {_item_id(group): group for group in topology.groups if _item_id(group) is not None}
-        self.rooms = {_item_id(room): room for room in topology.rooms if _item_id(room) is not None}
-        self.scenes = {_item_id(scene): scene for scene in topology.scenes if _item_id(scene) is not None}
+        self.groups = _items_by_id(topology.groups)
+        self.rooms = _items_by_id(topology.rooms)
+        self.scenes = _items_by_id(topology.scenes)
         return topology
 
     def apply_groups(self, message: Mapping[str, Any]) -> None:
-        self.groups.update(
-            {_item_id(group): group for group in list_payload(message, "groups") if _item_id(group) is not None}
-        )
+        self.groups.update(_items_by_id(list_payload(message, "groups")))
 
     def apply_rooms(self, message: Mapping[str, Any]) -> None:
-        self.rooms.update(
-            {_item_id(room): room for room in list_payload(message, "rooms") if _item_id(room) is not None}
-        )
+        self.rooms.update(_items_by_id(list_payload(message, "rooms")))
 
     def apply_scenes(self, message: Mapping[str, Any]) -> None:
-        self.scenes.update(
-            {_item_id(scene): scene for scene in list_payload(message, "scenes") if _item_id(scene) is not None}
-        )
+        self.scenes.update(_items_by_id(list_payload(message, "scenes")))
 
     def apply_message(self, message: Mapping[str, Any]) -> None:
         method = message.get("method")
-        if method == "gateway_post.topology":
+        if method == GatewayMethod.POST_TOPOLOGY:
             self.apply_topology(message)
-        elif method == "gateway_post.prop":
+        elif method == GatewayMethod.POST_PROP:
             self.apply_properties(message)
 
     def apply_properties(self, message: Mapping[str, Any]) -> list[PropertyChange]:
@@ -105,8 +99,12 @@ class GatewayState:
         return changes
 
     def full_property_coverage(self, message: Mapping[str, Any]) -> bool:
-        node_ids = {_item_id(item) for item in list_payload(message, "nodes")}
-        return bool(self.nodes) and set(self.nodes).issubset(node_ids)
+        items_by_id = {
+            node_id: item for item in list_payload(message, "nodes") if (node_id := _item_id(item)) is not None
+        }
+        return bool(self.nodes) and all(
+            node_id in items_by_id and items_by_id[node_id].get("o") is True for node_id in self.nodes
+        )
 
     def unknown_summary(self) -> dict[str, Any]:
         by_shape: dict[str, int] = {}
@@ -182,6 +180,15 @@ class GatewayState:
 def _item_id(item: Mapping[str, Any]) -> str | int | None:
     item_id = item.get("id")
     return item_id if isinstance(item_id, (str, int)) and not isinstance(item_id, bool) else None
+
+
+def _items_by_id(items: Iterable[Mapping[str, Any]]) -> dict[str | int, Mapping[str, Any]]:
+    result: dict[str | int, Mapping[str, Any]] = {}
+    for item in items:
+        item_id = _item_id(item)
+        if item_id is not None:
+            result[item_id] = item
+    return result
 
 
 def _mapping_or_empty(value: object) -> Mapping[str, Any]:

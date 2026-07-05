@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterable, Mapping
 from typing import Any, TypeVar
 
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -58,6 +58,14 @@ class YeelightProEntity(CoordinatorEntity[YeelightProCoordinator]):
             "device_type": node.type,
             "property_type": node.property_type,
         }
+
+    @property
+    def assumed_state(self) -> bool:
+        return self.coordinator.gateway.has_pending_overlay(self._node_id, self.optimistic_properties)
+
+    @property
+    def optimistic_properties(self) -> Iterable[str] | None:
+        return ()
 
 
 def base_entity_name(node: TopologyNode) -> str:
@@ -120,3 +128,23 @@ async def async_call_gateway(action: Awaitable[_T]) -> _T:
             translation_domain=DOMAIN,
             translation_key="gateway_action_failed",
         ) from exc
+
+
+async def async_set_node_props(
+    coordinator: YeelightProCoordinator,
+    node: TopologyNode,
+    props: Mapping[str, Any],
+    *,
+    duration: int | None = None,
+    optimistic: bool = True,
+) -> dict[str, Any]:
+    optimistic_props = props if optimistic else None
+    return await async_call_gateway(
+        coordinator.gateway.set_node_props(
+            node.id,
+            props,
+            nt=node.nt,
+            duration=duration,
+            optimistic_props=optimistic_props,
+        )
+    )

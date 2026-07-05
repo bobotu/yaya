@@ -9,5 +9,5 @@
   "issue_tracker": "https://github.com/bobotu/yaya/issues",
   "loggers": ["custom_components.yeelight_pro"],
   "requirements": [],
-  "version": "0.1.2"
+  "version": "0.2.0"
 }
