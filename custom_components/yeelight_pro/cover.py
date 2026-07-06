@@ -22,7 +22,6 @@ from .platform import async_add_dynamic_entities
 from .session.model import (
     MOTOR_MOTION_CLOSING,
     MOTOR_MOTION_OPENING,
-    MOTOR_TRACKING_ANGLE_MOTION,
     MOTOR_TRACKING_ASSUMED,
     MOTOR_TRACKING_POSITION_MOTION,
     MOTOR_TRACKING_TARGET_ANGLE,
@@ -82,16 +81,12 @@ class YeelightProCover(YeelightProEntity, CoverEntity):
 
     @property
     def is_opening(self) -> bool | None:
-        motion = _str_param(self.node, MOTOR_TRACKING_POSITION_MOTION) or _str_param(
-            self.node, MOTOR_TRACKING_ANGLE_MOTION
-        )
+        motion = _str_param(self.node, MOTOR_TRACKING_POSITION_MOTION)
         return None if motion is None else motion == MOTOR_MOTION_OPENING
 
     @property
     def is_closing(self) -> bool | None:
-        motion = _str_param(self.node, MOTOR_TRACKING_POSITION_MOTION) or _str_param(
-            self.node, MOTOR_TRACKING_ANGLE_MOTION
-        )
+        motion = _str_param(self.node, MOTOR_TRACKING_POSITION_MOTION)
         return None if motion is None else motion == MOTOR_MOTION_CLOSING
 
     @property
