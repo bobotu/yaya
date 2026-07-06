@@ -15,7 +15,7 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 
 from homeassistant.components.button import ButtonDeviceClass
 from homeassistant.components.climate.const import ATTR_FAN_MODE, FAN_AUTO, FAN_HIGH, FAN_LOW, FAN_MEDIUM, HVACMode
-from homeassistant.components.cover import ATTR_POSITION, ATTR_TILT_POSITION
+from homeassistant.components.cover import ATTR_POSITION, ATTR_TILT_POSITION, CoverState
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -47,7 +47,12 @@ from custom_components.yeelight_pro.session import (
     StateChangeReason,
     StateSnapshotChanged,
 )
-from custom_components.yeelight_pro.session.model import GatewayState, OptimisticStateOverlay
+from custom_components.yeelight_pro.session.model import (
+    MOTOR_TRACKING_ANGLE_MOTION,
+    MOTOR_TRACKING_TARGET_ANGLE,
+    GatewayState,
+    OptimisticStateOverlay,
+)
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -1484,6 +1489,16 @@ async def test_cover_services_send_standard_commands(
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"tra": 90}
         assert not gateway.has_pending_overlay("curtain-1")
+
+        gateway.update_node_params(
+            "curtain-1",
+            {
+                MOTOR_TRACKING_TARGET_ANGLE: 90,
+                MOTOR_TRACKING_ANGLE_MOTION: "opening",
+            },
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(cover_entity_id).state == CoverState.OPEN
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
