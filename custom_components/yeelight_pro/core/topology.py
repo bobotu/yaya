@@ -49,6 +49,7 @@ class TopologyNode:
     id: NodeId
     nt: int
     type: int
+    product_id: int | None = None
     property_type: int | None = None
     name: str | None = None
     room_id: NodeId | None = None
@@ -63,6 +64,7 @@ class TopologyNode:
             id=_node_id(item.get("id")),
             nt=_int_or_default(item.get("nt"), NodeType.MESH_SUBDEVICE),
             type=_int_or_default(item.get("type"), 0),
+            product_id=_int_or_none(item.get("pid")),
             property_type=_int_or_none(item.get("pt")),
             name=_str_or_none(item.get("name", item.get("n"))),
             room_id=_optional_node_id(_first_present(item, "roomId", "room_id", "roomid", "rid")),
@@ -79,6 +81,7 @@ class TopologyNode:
             self,
             nt=_int_or_default(item.get("nt"), self.nt),
             type=_int_or_default(item.get("type"), self.type),
+            product_id=_int_or_none(item.get("pid")) if "pid" in item else self.product_id,
             property_type=_int_or_none(item.get("pt")) if "pt" in item else self.property_type,
             name=_str_or_none(item.get("name", item.get("n"))) or self.name,
             room_id=(

@@ -21,7 +21,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import YeelightProCoordinator
 from .core.commands import BlinkType
 from .core.devices import LightDevice
-from .core.devices.light import MAX_COLOR_TEMP_KELVIN, MIN_COLOR_TEMP_KELVIN
+from .core.devices.light import color_temp_kelvin_range
 from .core.topology import DeviceType
 from .entity import YeelightProEntity, async_call_gateway, async_set_node_props
 from .helpers import light_device_type
@@ -49,8 +49,9 @@ class YeelightProLight(YeelightProEntity, LightEntity):
     def __init__(self, coordinator: YeelightProCoordinator, node: Any) -> None:
         super().__init__(coordinator, node, "light")
         self._attr_name = None
-        self._attr_min_color_temp_kelvin = MIN_COLOR_TEMP_KELVIN
-        self._attr_max_color_temp_kelvin = MAX_COLOR_TEMP_KELVIN
+        min_color_temp_kelvin, max_color_temp_kelvin = color_temp_kelvin_range(node.product_id)
+        self._attr_min_color_temp_kelvin = min_color_temp_kelvin
+        self._attr_max_color_temp_kelvin = max_color_temp_kelvin
         self._attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
 
     @property

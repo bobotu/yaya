@@ -879,6 +879,25 @@ async def test_light_service_maps_transition_and_flash(
         await hass.async_block_till_done()
 
 
+async def test_light_uses_product_specific_color_temperature_range(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    topology_fixture["nodes"][0]["pid"] = 198672
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        state = hass.states.get(light_entity_id)
+        assert state is not None
+        assert state.attributes["min_color_temp_kelvin"] == 1600
+        assert state.attributes["max_color_temp_kelvin"] == 8000
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
 async def test_light_service_skips_unavailable_entity_without_gateway_command(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],

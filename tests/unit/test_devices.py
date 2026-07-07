@@ -166,6 +166,30 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await light.set_color_temperature(6501)
 
+    async def test_light_commands_use_product_specific_color_temperature_range(self) -> None:
+        node = TopologyNode.from_mapping(
+            {
+                "id": "sky-light-1",
+                "nt": 2,
+                "type": 3,
+                "pid": 198672,
+            }
+        )
+        light = create_device(node, self.executor)
+        assert isinstance(light, LightDevice)
+
+        await light.set_color_temperature(1600)
+        await light.set_color_temperature(8000)
+        await light.turn_on(color_temperature=8000)
+
+        self.assertEqual(self.executor.commands[0].to_payload()["set"], {"ct": 1600})
+        self.assertEqual(self.executor.commands[1].to_payload()["set"], {"ct": 8000})
+        self.assertEqual(self.executor.commands[2].to_payload()["set"], {"p": True, "ct": 8000})
+        with self.assertRaises(ValueError):
+            await light.set_color_temperature(1599)
+        with self.assertRaises(ValueError):
+            await light.set_color_temperature(8001)
+
     async def test_dream_curtain_position_angle_and_stop(self) -> None:
         curtain = create_device(self.nodes["curtain-1"], self.executor)
         assert isinstance(curtain, DreamCurtainDevice)
