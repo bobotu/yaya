@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -37,8 +38,8 @@ from custom_components.yeelight_pro.const import (
     EVENT_YEELIGHT_PRO,
     SWITCH_MODE_WIRELESS,
 )
-from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand
-from custom_components.yeelight_pro.entity import YeelightProNodeUnavailableError
+from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand, ProtocolError
+from custom_components.yeelight_pro.entity import YeelightProNodeUnavailableError, YeelightProProtocolActionError
 from custom_components.yeelight_pro.helpers import node_unique_id
 from custom_components.yeelight_pro.light import YeelightProLight
 from custom_components.yeelight_pro.session import (
@@ -67,9 +68,11 @@ class FakeGateway:
         self.last_disconnect_error = None
         self.connected = False
         self.commands: list[NodeCommand] = []
+        self.next_set_node_props_error: Exception | None = None
         self.refreshed_node_ids: list[str | int] = []
         self.sync_kwargs: list[dict[str, Any]] = []
         self._intents = CommandIntentRegistry()
+        self._stale_node_ids: set[str] = set()
         self._event_listeners = []
         self._property_listeners = []
         self._session_listeners = []
@@ -107,6 +110,7 @@ class FakeGateway:
     async def sync(self, **kwargs: Any) -> None:
         self.sync_kwargs.append(kwargs)
         self._intents.clear_all()
+        self._stale_node_ids.clear()
         self.state.apply_topology(self.fixture)
         self.last_full_sync_source = "poll"
         previous = self.session_state
@@ -131,6 +135,10 @@ class FakeGateway:
         intent_props: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.commands.append(NodeCommand(id=node_id, nt=nt, props=props, duration=duration))
+        if self.next_set_node_props_error is not None:
+            error = self.next_set_node_props_error
+            self.next_set_node_props_error = None
+            raise error
         if intent_props:
             self._intents.record_property_intents(
                 {node_id: intent_props},
@@ -142,10 +150,10 @@ class FakeGateway:
 
     def visible_node(self, node_id: str | int) -> Any:
         node = self.state.nodes.get(node_id)
-        return None if node is None else self._intents.project_visible(node)
+        return None if node is None else self._project_visible(node)
 
     def visible_nodes(self) -> list[Any]:
-        return [self._intents.project_visible(node) for node in self.state.nodes.values()]
+        return [self._project_visible(node) for node in self.state.nodes.values()]
 
     def has_pending_intent(self, node_id: str | int, props: Any = None) -> bool:
         return self._intents.has_pending(node_id, props)
@@ -193,6 +201,7 @@ class FakeGateway:
             listener(event)
 
     def update_node_params(self, node_id: str | int, params: dict[str, Any]) -> None:
+        self._stale_node_ids.discard(str(node_id))
         self.state.apply_properties(
             {
                 "method": "gateway_post.prop",
@@ -211,6 +220,21 @@ class FakeGateway:
             now=asyncio.get_running_loop().time(),
         )
         self._notify_state({"method": "gateway_post.prop"})
+
+    def expire_command_intents(self) -> None:
+        expired = self._intents.expire_pending(now=asyncio.get_running_loop().time() + 3600)
+        if not expired:
+            return
+        for item in expired:
+            self._stale_node_ids.add(str(item.node_id))
+            self.refreshed_node_ids.append(item.node_id)
+        self._notify_state({"method": "gateway_intent.expired"})
+
+    def _project_visible(self, node: Any) -> Any:
+        visible = self._intents.project_visible(node)
+        if str(node.id) in self._stale_node_ids:
+            return replace(visible, online=False)
+        return visible
 
     def _notify_state(self, message: dict[str, Any]) -> None:
         event = StateSnapshotChanged(reason=_state_reason(message), message=message)
@@ -238,6 +262,8 @@ class FakeGateway:
         self.fixture = fixture
         self.state.apply_topology(fixture)
         self._intents.clear_missing_nodes(self.state.topology_node_ids)
+        active_node_ids = {str(node_id) for node_id in self.state.topology_node_ids}
+        self._stale_node_ids.intersection_update(active_node_ids)
         for listener in list(self._state_listeners):
             listener(
                 StateSnapshotChanged(
@@ -1017,6 +1043,73 @@ async def test_light_service_intent_state_masks_transition_intermediate_push(
         assert state.attributes["brightness"] == 128
         assert state.attributes["color_temp_kelvin"] == 3000
         assert not gateway.has_pending_intent("light-1", ["p", "l", "ct"])
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_light_service_failed_write_does_not_create_intent_state(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        assert hass.states.get(light_entity_id).state == STATE_ON
+
+        gateway.next_set_node_props_error = ProtocolError("missing write acknowledgement")
+        with pytest.raises(YeelightProProtocolActionError) as err:
+            await hass.services.async_call(
+                "light",
+                "turn_off",
+                {ATTR_ENTITY_ID: light_entity_id},
+                blocking=True,
+            )
+
+        assert err.value.translation_key == "gateway_protocol_error"
+        await hass.async_block_till_done()
+        assert gateway.commands[-1].to_payload()["set"] == {"p": False}
+        assert not gateway.has_pending_intent("light-1", ["p"])
+        assert hass.states.get(light_entity_id).state == STATE_ON
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_light_intent_expiry_marks_entity_unavailable_until_refresh_arrives(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+
+        await hass.services.async_call(
+            "light",
+            "turn_off",
+            {ATTR_ENTITY_ID: light_entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+        assert gateway.has_pending_intent("light-1", ["p"])
+        assert hass.states.get(light_entity_id).state == STATE_OFF
+
+        gateway.expire_command_intents()
+        await hass.async_block_till_done()
+
+        assert gateway.refreshed_node_ids == ["light-1"]
+        assert not gateway.has_pending_intent("light-1", ["p"])
+        assert hass.states.get(light_entity_id).state == STATE_UNAVAILABLE
+
+        gateway.update_node_params("light-1", {"p": True})
+        await hass.async_block_till_done()
+
+        assert hass.states.get(light_entity_id).state == STATE_ON
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

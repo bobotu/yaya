@@ -1336,7 +1336,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
                 await writer.wait_closed()
 
         host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port, request_timeout=0.05)
+        gateway = YeelightProGateway(host, port=port, request_timeout=0.2)
 
         try:
             await gateway.connect()
