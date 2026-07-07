@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"
 from yeelight_pro.core import (  # noqa: E402
     ProtocolError,
     Topology,
+    TopologyNode,
     build_request,
     iter_gateway_events,
     parse_discovery_response,
@@ -47,6 +48,16 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(len(topology.nodes), 10)
         self.assertEqual(topology.groups[0]["nt"], 4)
         self.assertEqual(topology.nodes[1].type, 22)
+        self.assertIsNone(topology.nodes[0].product_id)
+
+    def test_topology_preserves_product_id(self) -> None:
+        node = TopologyNode.from_mapping({"id": "light-1", "nt": 2, "type": 3, "pid": 198672})
+
+        self.assertEqual(node.product_id, 198672)
+
+        updated = node.merge_update({"id": "light-1", "pid": 198666})
+
+        self.assertEqual(updated.product_id, 198666)
 
     def test_state_merges_property_push(self) -> None:
         fixture = json.loads((Path(__file__).parent / "fixtures" / "topology-direct.json").read_text())
