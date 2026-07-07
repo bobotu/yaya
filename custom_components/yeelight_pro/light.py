@@ -55,7 +55,7 @@ class YeelightProLight(YeelightProEntity, LightEntity):
         self._attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
 
     @property
-    def optimistic_properties(self) -> tuple[str, ...]:
+    def intent_properties(self) -> tuple[str, ...]:
         return ("p", "l", "ct", "c")
 
     @property

@@ -12,13 +12,9 @@ class StateChangeReason(StrEnum):
     GENERIC_PUSH = "generic push"
     NODE_REFRESH = "node refresh"
     POLL_FULL_PROPERTIES = "poll full properties"
-    OPTIMISTIC_UPDATE = "optimistic update"
-    OPTIMISTIC_CLEARED = "optimistic_cleared"
-    OPTIMISTIC_EXPIRED = "optimistic expired"
-    MOTOR_TARGET = "motor target"
-    MOTOR_STOPPED = "motor stopped"
-    MOTOR_TRACKING_CLEARED = "motor tracking cleared"
-    MOTOR_TRACKING_EXPIRED = "motor tracking expired"
+    COMMAND_INTENT_RECORDED = "command intent recorded"
+    COMMAND_INTENT_CLEARED = "command intent cleared"
+    COMMAND_INTENT_EXPIRED = "command intent expired"
 
 
 class FullSyncSource(StrEnum):
@@ -29,10 +25,6 @@ class FullSyncSource(StrEnum):
 class SyntheticSessionMethod(StrEnum):
     SYNC_TOPOLOGY = "gateway_sync.topology"
     SYNC_COMPLETE = "gateway_sync.complete"
-    OVERLAY_OPTIMISTIC = "gateway_overlay.optimistic"
-    OVERLAY_CLEAR = "gateway_overlay.clear"
-    OVERLAY_EXPIRED = "gateway_overlay.expired"
-    MOTOR_TARGET = "gateway_motor.target"
-    MOTOR_STOP = "gateway_motor.stop"
-    MOTOR_CLEAR = "gateway_motor.clear"
-    MOTOR_EXPIRED = "gateway_motor.expired"
+    COMMAND_INTENT_RECORDED = "gateway_intent.recorded"
+    COMMAND_INTENT_CLEAR = "gateway_intent.clear"
+    COMMAND_INTENT_EXPIRED = "gateway_intent.expired"

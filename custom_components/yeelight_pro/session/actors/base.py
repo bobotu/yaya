@@ -86,6 +86,10 @@ class Actor(Generic[MessageT]):
         if self._task is None or self._task.done():
             self._task = create_actor_task(self._run(), name=self.name)
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     async def close(self) -> None:
         if self._closed:
             return

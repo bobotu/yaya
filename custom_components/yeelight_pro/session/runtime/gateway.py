@@ -8,15 +8,13 @@ from ...core.const import GATEWAY_CONTROL_PORT
 from ...core.protocol import GatewayMethod
 from ..actors import ActorRef, ConnectionActor, DeviceStateActor, SessionActor
 from ..messages import (
-    ApplyMotorStopCommand,
-    ApplyMotorTargetsCommand,
-    ApplyOptimisticPropsCommand,
     CloseConnectionCommand,
     ConfigureAutoSyncCommand,
     ConnectSessionCommand,
     DisableAutoSyncCommand,
     FullSyncSource,
     GatewayRpcRequest,
+    RecordCommandIntentCommand,
     RefreshNodeCommand,
     RefreshNodeRequestedEvent,
     SetSessionStateCommand,
@@ -24,7 +22,6 @@ from ..messages import (
     SyncSessionCommand,
 )
 from ..model.motor import MotorTargetIntent
-from ..model.optimistic import OPTIMISTIC_STATE_TTL
 from ..model.status import GatewaySessionState
 from ..transport import GatewayRPC
 
@@ -41,7 +38,7 @@ class YeelightProRuntime:
         port: int = GATEWAY_CONTROL_PORT,
         request_timeout: float = 5.0,
         reconnect_delay: float = 2.0,
-        optimistic_state_ttl: float = OPTIMISTIC_STATE_TTL,
+        command_intent_ttl: float | None = None,
         rpc: GatewayRPC | None = None,
     ) -> None:
         self.rpc = rpc or GatewayRPC(
@@ -53,7 +50,7 @@ class YeelightProRuntime:
         self.connection = ConnectionActor(self.rpc)
         self.connection_ref = ActorRef(self.connection)
         self.connection.bind_push_listener(self.connection_ref)
-        self.state = DeviceStateActor(ttl=optimistic_state_ttl)
+        self.state = DeviceStateActor(ttl=command_intent_ttl)
         self.state_ref = ActorRef(self.state)
         self.session = SessionActor(connection_ref=self.connection_ref, device_state_ref=self.state_ref)
         self.session_ref = ActorRef(self.session)
@@ -154,14 +151,22 @@ class YeelightProRuntime:
             GatewayRpcRequest(method=method, payload=payload, on_written=on_written, timeout=timeout)
         )
 
-    async def apply_optimistic_props(self, props_by_node: Mapping[str | int, Mapping[str, Any]]) -> None:
-        await self.state_ref.ask(ApplyOptimisticPropsCommand(props_by_node))
-
-    async def apply_motor_targets(self, targets: tuple[MotorTargetIntent, ...]) -> None:
-        await self.state_ref.ask(ApplyMotorTargetsCommand(targets))
-
-    async def apply_motor_stop(self, node_ids: tuple[str | int, ...]) -> None:
-        await self.state_ref.ask(ApplyMotorStopCommand(node_ids))
+    async def record_command_intents(
+        self,
+        props_by_node: Mapping[str | int, Mapping[str, Any]],
+        *,
+        ttl_by_node: Mapping[str | int, float] | None = None,
+        motor_targets: tuple[MotorTargetIntent, ...] = (),
+        motor_stops: tuple[str | int, ...] = (),
+    ) -> None:
+        await self.state_ref.ask(
+            RecordCommandIntentCommand(
+                props_by_node=props_by_node,
+                ttl_by_node=ttl_by_node,
+                motor_targets=motor_targets,
+                motor_stops=motor_stops,
+            )
+        )
 
     async def get_topology(self) -> JSONDict:
         return await self.request(GatewayMethod.GET_TOPOLOGY)

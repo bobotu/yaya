@@ -33,18 +33,16 @@ class RefreshNodeRequestedEvent:
 
 
 @dataclass(frozen=True)
-class ApplyOptimisticPropsCommand:
+class RecordCommandIntentCommand:
     props_by_node: Mapping[str | int, Mapping[str, Any]]
+    ttl_by_node: Mapping[str | int, float] | None = None
+    motor_targets: tuple[MotorTargetIntent, ...] = ()
+    motor_stops: tuple[str | int, ...] = ()
 
 
 @dataclass(frozen=True)
-class ApplyMotorTargetsCommand:
-    targets: tuple[MotorTargetIntent, ...]
-
-
-@dataclass(frozen=True)
-class ApplyMotorStopCommand:
-    node_ids: tuple[str | int, ...]
+class ExpireCommandIntentsCommand:
+    pass
 
 
 @dataclass(frozen=True)
@@ -88,16 +86,6 @@ class AppliedPropertiesResult:
     full_property_coverage: bool
 
 
-@dataclass(frozen=True)
-class ExpireOptimisticStateCommand:
-    pass
-
-
-@dataclass(frozen=True)
-class ExpireMotorTrackingCommand:
-    pass
-
-
 DeviceStateActorMessage: TypeAlias = (
     ApplyTopologyCommand
     | ApplyPropertiesCommand
@@ -105,12 +93,9 @@ DeviceStateActorMessage: TypeAlias = (
     | ApplyGroupsCommand
     | ApplyRoomsCommand
     | ApplyScenesCommand
-    | ApplyOptimisticPropsCommand
-    | ApplyMotorTargetsCommand
-    | ApplyMotorStopCommand
+    | RecordCommandIntentCommand
+    | ExpireCommandIntentsCommand
     | SyncStartedEvent
     | SyncCompletedEvent
     | SessionStatusChanged
-    | ExpireOptimisticStateCommand
-    | ExpireMotorTrackingCommand
 )

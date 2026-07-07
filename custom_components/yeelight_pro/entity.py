@@ -61,10 +61,10 @@ class YeelightProEntity(CoordinatorEntity[YeelightProCoordinator]):
 
     @property
     def assumed_state(self) -> bool:
-        return self.coordinator.gateway.has_pending_overlay(self._node_id, self.optimistic_properties)
+        return self.coordinator.gateway.has_pending_intent(self._node_id, self.intent_properties)
 
     @property
-    def optimistic_properties(self) -> Iterable[str] | None:
+    def intent_properties(self) -> Iterable[str] | None:
         return ()
 
     def require_current_node(self) -> TopologyNode:
@@ -153,15 +153,15 @@ async def async_set_node_props(
     props: Mapping[str, Any],
     *,
     duration: int | None = None,
-    optimistic: bool = True,
+    track_intent: bool = True,
 ) -> dict[str, Any]:
-    optimistic_props = props if optimistic else None
+    intent_props = props if track_intent else None
     return await async_call_gateway(
         coordinator.gateway.set_node_props(
             node.id,
             props,
             nt=node.nt,
             duration=duration,
-            optimistic_props=optimistic_props,
+            intent_props=intent_props,
         )
     )
