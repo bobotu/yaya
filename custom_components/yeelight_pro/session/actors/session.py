@@ -49,6 +49,7 @@ JSONDict = dict[str, Any]
 SessionStatusListener = Callable[[SessionStatusChanged], Awaitable[None] | None]
 GatewayEventListener = Callable[[GatewayEventReceived], Awaitable[None] | None]
 _LOGGER = logging.getLogger(__name__)
+_MAX_LOG_ITEMS = 20
 
 
 @dataclass(frozen=True)
@@ -206,12 +207,14 @@ class SessionActor(Actor[SessionActorMessage]):
 
     async def _begin_sync(self, message: SyncSessionCommand) -> asyncio.Future[None]:
         if self._sync_waiter is not None and not self._sync_waiter.done():
+            _LOGGER.debug("Yeelight Pro sync joined existing waiter: sync_id=%s", self._sync_id)
             return self._sync_waiter
         self._cancel_sync_timeout()
         self._clear_ready()
         self._sync_waiter = asyncio.get_running_loop().create_future()
         options = _SyncOptions.from_message(message)
         self.last_full_sync_source = None
+        _LOGGER.debug("Yeelight Pro sync starting: options=%s", options)
         try:
             await self.device_state_ref.tell(SyncStartedEvent(reason=StateChangeReason.MANUAL_SYNC))
             await self._set_session_state(GatewaySessionState.WAITING_TOPOLOGY)
@@ -239,6 +242,12 @@ class SessionActor(Actor[SessionActorMessage]):
         self._sync_options_by_id[sync_id] = options
         self.last_full_sync_source = None
         await self._set_session_state(GatewaySessionState.WAITING_FULL_PROP)
+        _LOGGER.debug(
+            "Yeelight Pro waiting for full property push: sync_id=%s timeout=%s options=%s",
+            sync_id,
+            self.full_prop_timeout,
+            options,
+        )
         self._sync_timeout_task = self.defer_later(
             self.full_prop_timeout,
             options.to_timeout(sync_id),
@@ -247,8 +256,15 @@ class SessionActor(Actor[SessionActorMessage]):
 
     async def _handle_full_property_timeout(self, message: FullPropertySyncTimedOutEvent) -> None:
         if message.sync_id != self._sync_id or self.session_state != GatewaySessionState.WAITING_FULL_PROP:
+            _LOGGER.debug(
+                "Yeelight Pro ignored full property timeout: message_sync_id=%s active_sync_id=%s state=%s",
+                message.sync_id,
+                self._sync_id,
+                self.session_state,
+            )
             return
         try:
+            _LOGGER.debug("Yeelight Pro full property push timeout; polling all nodes: sync_id=%s", message.sync_id)
             await self._set_session_state(GatewaySessionState.RECOVERING)
             result = await self._get_all_nodes()
             await self.device_state_ref.ask(
@@ -264,6 +280,12 @@ class SessionActor(Actor[SessionActorMessage]):
 
     async def _finish_sync(self, options: _SyncOptions) -> None:
         self._cancel_sync_timeout()
+        _LOGGER.debug(
+            "Yeelight Pro finishing sync: sync_id=%s source=%s options=%s",
+            self._sync_id,
+            self.last_full_sync_source,
+            options,
+        )
         if options.include_groups:
             await self.device_state_ref.ask(ApplyGroupsCommand(await self._get_group()))
         if options.include_rooms:
@@ -281,6 +303,7 @@ class SessionActor(Actor[SessionActorMessage]):
 
     async def _handle_connection_online(self, event: ConnectionOnlineEvent) -> None:
         self._connection_epoch = event.epoch
+        _LOGGER.debug("Yeelight Pro session connection online: epoch=%s auto_sync=%s", event.epoch, self._auto_sync)
         if not self._auto_sync:
             return
         try:
@@ -294,6 +317,12 @@ class SessionActor(Actor[SessionActorMessage]):
         if event.epoch != self._connection_epoch:
             _LOGGER.debug("Dropping stale connection lost event for epoch %s", event.epoch)
             return
+        _LOGGER.debug(
+            "Yeelight Pro session connection lost: epoch=%s state=%s error=%s",
+            event.epoch,
+            self.session_state,
+            repr(event.error),
+        )
         self._clear_ready()
         self._cancel_sync_timeout()
         if self.session_state == GatewaySessionState.CLOSING:
@@ -307,7 +336,9 @@ class SessionActor(Actor[SessionActorMessage]):
         )
 
     async def _refresh_node(self, node_id: str | int) -> JSONDict:
+        _LOGGER.debug("Yeelight Pro refreshing node: node_id=%s", node_id)
         result = await self._get_node(node_id)
+        _LOGGER.debug("Yeelight Pro refresh node response: node_id=%s summary=%s", node_id, _message_summary(result))
         await self.device_state_ref.ask(ApplyPropertiesCommand(payload=result, reason=StateChangeReason.NODE_REFRESH))
         return result
 
@@ -317,6 +348,12 @@ class SessionActor(Actor[SessionActorMessage]):
             return
         message = event.message
         method = message.get("method")
+        _LOGGER.debug(
+            "Yeelight Pro RPC push dispatch: epoch=%s state=%s summary=%s",
+            event.epoch,
+            self.session_state,
+            _message_summary(message),
+        )
         if method == GatewayMethod.POST_PROP:
             applied = await self.device_state_ref.ask(
                 ApplyPropertiesCommand(payload=message, reason=StateChangeReason.PROPERTY_PUSH)
@@ -352,6 +389,7 @@ class SessionActor(Actor[SessionActorMessage]):
         if previous == state and error is None:
             return
         self.session_state = state
+        _LOGGER.debug("Yeelight Pro session state changed: %s -> %s error=%s", previous, state, repr(error))
         event = SessionStatusChanged(previous=previous, current=state, error=error)
         await self.device_state_ref.tell(event)
         if state in {GatewaySessionState.CLOSING, GatewaySessionState.DISCONNECTED}:
@@ -396,6 +434,33 @@ def _id_payload(item_id: str | int | None) -> Mapping[str, Any] | None:
     if item_id is None:
         return None
     return {"params": {"id": item_id}}
+
+
+def _message_summary(message: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for key in ("id", "method", "result", "data"):
+        if key in message:
+            summary[key] = message.get(key)
+    nodes = message.get("nodes")
+    if isinstance(nodes, list):
+        summary["node_count"] = len(nodes)
+        summary["nodes"] = tuple(_node_summary(item) for item in nodes[:_MAX_LOG_ITEMS] if isinstance(item, Mapping))
+    groups = message.get("groups")
+    if isinstance(groups, list):
+        summary["group_count"] = len(groups)
+        summary["groups"] = tuple(_node_summary(item) for item in groups[:_MAX_LOG_ITEMS] if isinstance(item, Mapping))
+    return summary
+
+
+def _node_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {"id": item.get("id")}
+    for key in ("nt", "type"):
+        if key in item:
+            summary[key] = item.get(key)
+    params = item.get("params")
+    if isinstance(params, Mapping):
+        summary["params"] = dict(params)
+    return summary
 
 
 async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
