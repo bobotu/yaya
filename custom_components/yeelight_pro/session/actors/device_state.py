@@ -39,6 +39,7 @@ from ..model.status import GatewaySessionState
 from .base import Actor, create_actor_task
 
 _LOGGER = logging.getLogger(__name__)
+_MAX_LOG_ITEMS = 20
 StateListener = Callable[[StateSnapshotChanged], Awaitable[None] | None]
 PropertyListener = Callable[[PropertyChange], Awaitable[None] | None]
 RefreshRequester = Callable[[RefreshNodeRequestedEvent], Awaitable[None] | None]
@@ -174,6 +175,14 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         now = asyncio.get_running_loop().time()
         affected = self.intents.apply_authoritative_message(event.message, nodes=self.state.nodes, now=now)
         stale_affected = self._clear_stale_from_message(event.message)
+        _LOGGER.debug(
+            "Yeelight Pro authoritative state applied: "
+            "reason=%s summary=%s intent_cleared_nodes=%s stale_cleared_nodes=%s",
+            event.reason,
+            _message_summary(event.message),
+            sorted(str(node_id) for node_id in affected),
+            sorted(str(node_id) for node_id in stale_affected),
+        )
         if topology_changed and active_topology_node_ids is not None:
             affected.update(self.intents.clear_missing_nodes(active_topology_node_ids))
             stale_affected.update(self._clear_missing_stale_nodes(active_topology_node_ids))
@@ -208,6 +217,14 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         affected.update(self.intents.record_motor_targets(message.motor_targets, nodes=self.state.nodes, now=now))
         for node_id in message.motor_stops:
             affected.update(self.intents.clear_node(node_id))
+        _LOGGER.debug(
+            "Yeelight Pro command intent recorded: props=%s motor_targets=%s motor_stops=%s affected=%s diagnostics=%s",
+            _props_by_node_summary(message.props_by_node),
+            _motor_targets_summary(message.motor_targets),
+            tuple(str(node_id) for node_id in message.motor_stops),
+            sorted(str(node_id) for node_id in affected),
+            self.intents.diagnostics(now=now),
+        )
         if not affected:
             return
         self._schedule_watchdog()
@@ -223,6 +240,10 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
     async def _handle_sync_started(self) -> None:
         affected = self.intents.clear_all()
         self._cancel_watchdog()
+        _LOGGER.debug(
+            "Yeelight Pro command intents cleared on sync start: affected=%s",
+            sorted(str(node_id) for node_id in affected),
+        )
         if affected:
             self._rebuild_visible_cache()
             await self._publish_snapshot(
@@ -235,6 +256,12 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             return
         affected = self.intents.clear_all()
         self._cancel_watchdog()
+        _LOGGER.debug(
+            "Yeelight Pro command intents cleared on session state: state=%s affected=%s error=%s",
+            event.current,
+            sorted(str(node_id) for node_id in affected),
+            repr(event.error) if event.error is not None else None,
+        )
         if affected:
             self._rebuild_visible_cache()
             await self._publish_snapshot(
@@ -245,6 +272,12 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
     async def _expire_command_intents(self) -> None:
         expired = self.intents.expire_pending(now=asyncio.get_running_loop().time())
         affected = self._mark_stale(expired)
+        _LOGGER.debug(
+            "Yeelight Pro command intents expired: expired=%s affected=%s stale=%s",
+            _expired_summary(expired),
+            sorted(str(node_id) for node_id in affected),
+            _stale_summary(self._stale_node_props),
+        )
         self._schedule_watchdog()
         if not affected:
             return
@@ -301,8 +334,16 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             if isinstance(prop, str):
                 stale_props.discard(prop)
         if stale_props:
-            return {stale_node_id} if len(stale_props) != before else set()
+            affected = {stale_node_id} if len(stale_props) != before else set()
+            if affected:
+                _LOGGER.debug(
+                    "Yeelight Pro stale properties partially cleared: node_id=%s remaining=%s",
+                    stale_node_id,
+                    sorted(stale_props),
+                )
+            return affected
         self._stale_node_props.pop(node_key, None)
+        _LOGGER.debug("Yeelight Pro stale node cleared: node_id=%s", stale_node_id)
         return {stale_node_id}
 
     def _clear_missing_stale_nodes(self, node_ids: Iterable[str | int]) -> set[str | int]:
@@ -322,6 +363,10 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         next_expiration = self.intents.next_expiration(now=now)
         if next_expiration is None:
             return
+        _LOGGER.debug(
+            "Yeelight Pro command intent watchdog scheduled: expires_in=%.3f",
+            max(0.0, next_expiration - now),
+        )
         self._watchdog = self.defer_later(
             max(0.0, next_expiration - now),
             ExpireCommandIntentsCommand(),
@@ -340,6 +385,11 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             if _node_key(node_id) in self._stale_node_props:
                 visible = replace(visible, online=False)
             self._visible_nodes[node_id] = visible
+        _LOGGER.debug(
+            "Yeelight Pro visible cache rebuilt: nodes=%s stale=%s",
+            len(self._visible_nodes),
+            _stale_summary(self._stale_node_props),
+        )
 
     async def _publish_snapshot(
         self,
@@ -358,6 +408,74 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
 
 def _payload_node_id(item: Mapping[str, Any]) -> str | int | None:
     return node_id_or_none(item.get("id"))
+
+
+def _message_summary(message: Mapping[str, Any]) -> dict[str, Any]:
+    nodes = []
+    raw_nodes = list_payload(message, "nodes")
+    for item in raw_nodes[:_MAX_LOG_ITEMS]:
+        node_id = _payload_node_id(item)
+        params = item.get("params")
+        nodes.append(
+            {
+                "id": node_id,
+                "params": dict(params) if isinstance(params, Mapping) else None,
+            }
+        )
+    summary: dict[str, Any] = {
+        "method": message.get("method"),
+        "node_count": len(raw_nodes),
+        "nodes": nodes,
+    }
+    for key in ("id", "result"):
+        if key in message:
+            summary[key] = message.get(key)
+    raw_groups = list_payload(message, "groups")
+    if raw_groups:
+        summary["group_count"] = len(raw_groups)
+        summary["groups"] = tuple(_summary_state_item(item) for item in raw_groups[:_MAX_LOG_ITEMS])
+    return summary
+
+
+def _summary_state_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {"id": _payload_node_id(item)}
+    for key in ("nt", "type"):
+        if key in item:
+            summary[key] = item.get(key)
+    params = item.get("params")
+    if isinstance(params, Mapping):
+        summary["params"] = dict(params)
+    return summary
+
+
+def _props_by_node_summary(props_by_node: Mapping[str | int, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {str(node_id): dict(props) for node_id, props in props_by_node.items()}
+
+
+def _motor_targets_summary(targets: Iterable[Any]) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "node_id": str(target.node_id),
+            "current_prop": target.current_prop,
+            "target_prop": target.target_prop,
+            "target_value": target.target_value,
+        }
+        for target in targets
+    )
+
+
+def _expired_summary(expired: Iterable[Any]) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "node_id": str(item.node_id),
+            "props": tuple(item.props),
+        }
+        for item in expired
+    )
+
+
+def _stale_summary(stale: Mapping[str, tuple[str | int, set[str]]]) -> dict[str, tuple[str, ...]]:
+    return {str(node_id): tuple(sorted(props)) for node_id, props in stale.values()}
 
 
 async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
