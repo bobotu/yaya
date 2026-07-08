@@ -7,6 +7,7 @@ from typing import Any
 from ...core.coercion import int_or_none as _int_or_none
 from ...core.coercion import node_id_or_none
 from ...core.coercion import node_key as _node_key
+from ...core.protocol import list_payload
 from ...core.topology import TopologyNode
 from .motor import (
     MOTOR_TARGET_ANGLE_PROP,
@@ -308,16 +309,12 @@ class CommandIntentRegistry:
         now: float,
     ) -> set[str | int]:
         affected: set[str | int] = set()
-        raw_nodes = message.get("nodes")
-        if isinstance(raw_nodes, list):
-            for item in raw_nodes:
-                if not isinstance(item, Mapping):
-                    continue
-                node_id = _item_id(item)
-                params = item.get("params")
-                if node_id is None or not isinstance(params, Mapping):
-                    continue
-                affected.update(self.properties.apply_authoritative_node(node_id, params, now=now))
+        for item in _authoritative_property_items(message):
+            node_id = _item_id(item)
+            params = item.get("params")
+            if node_id is None or not isinstance(params, Mapping):
+                continue
+            affected.update(self.properties.apply_authoritative_node(node_id, params, now=now))
         affected.update(self.motor.apply_authoritative_message(message, nodes, now=now))
         return affected
 
@@ -375,6 +372,11 @@ class CommandIntentRegistry:
 
 def _item_id(item: Mapping[str, Any]) -> str | int | None:
     return node_id_or_none(item.get("id"))
+
+
+def _authoritative_property_items(message: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+    yield from list_payload(message, "nodes")
+    yield from list_payload(message, "groups")
 
 
 def _trackable_property_props(props: Mapping[str, Any]) -> dict[str, Any]:

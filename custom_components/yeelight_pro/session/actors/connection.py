@@ -136,8 +136,10 @@ class ConnectionActor(Actor[ConnectionActorMessage]):
         raise TypeError(f"unsupported connection message: {type(message).__name__}")
 
     async def _connect_now(self) -> None:
+        _LOGGER.debug("Yeelight Pro connection actor connecting: current_epoch=%s", self._epoch)
         await self.rpc.connect()
         self._epoch += 1
+        _LOGGER.debug("Yeelight Pro connection actor connected: epoch=%s", self._epoch)
         await self._send_session_message(ConnectionOnlineEvent(epoch=self._epoch))
 
     async def _close_now(self) -> None:
@@ -151,8 +153,32 @@ class ConnectionActor(Actor[ConnectionActorMessage]):
                 await self._runner
             self._runner = None
         await self.rpc.close()
+        _LOGGER.debug(
+            "Yeelight Pro connection actor closed: epoch=%s error=%s",
+            self._epoch,
+            repr(self.rpc.last_disconnect_error),
+        )
         await self._send_session_message(ConnectionLostEvent(epoch=self._epoch, error=self.rpc.last_disconnect_error))
 
     async def _send_session_message(self, message: ConnectionSessionEvent) -> None:
         if self._session_sink is not None:
+            _LOGGER.debug("Yeelight Pro connection session event: %s", _session_event_summary(message))
             await self._session_sink(message)
+
+
+def _session_event_summary(message: ConnectionSessionEvent) -> dict[str, Any]:
+    summary: dict[str, Any] = {"type": type(message).__name__}
+    epoch = getattr(message, "epoch", None)
+    if epoch is not None:
+        summary["epoch"] = epoch
+    error = getattr(message, "error", None)
+    if error is not None:
+        summary["error"] = repr(error)
+    push = getattr(message, "message", None)
+    if isinstance(push, Mapping):
+        summary["method"] = push.get("method")
+        summary["id"] = push.get("id")
+        nodes = push.get("nodes")
+        if isinstance(nodes, list):
+            summary["node_count"] = len(nodes)
+    return summary

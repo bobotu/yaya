@@ -9,7 +9,7 @@ from typing import Any
 from ...core.coercion import int_or_none as _int_or_none
 from ...core.coercion import node_id_or_none
 from ...core.protocol import GatewayMethod, list_payload
-from ...core.topology import Topology, TopologyNode
+from ...core.topology import NodeType, Topology, TopologyNode
 from ...core.updates import PropertyChange
 
 
@@ -86,8 +86,21 @@ class GatewayState:
             self.scenes.update(_items_by_id(topology.scenes))
         return topology
 
-    def apply_groups(self, message: Mapping[str, Any]) -> None:
-        self.groups.update(_items_by_id(list_payload(message, "groups")))
+    def apply_groups(self, message: Mapping[str, Any]) -> list[PropertyChange]:
+        changes: list[PropertyChange] = []
+        groups = list_payload(message, "groups")
+        self.groups.update(_items_by_id(groups))
+        for item in groups:
+            node_id = _item_id(item)
+            if node_id is None:
+                continue
+            current = self.nodes.get(node_id)
+            if current is None or current.nt != NodeType.MESH_GROUP:
+                continue
+            updated = current.merge_update(item)
+            self.nodes[node_id] = updated
+            changes.append(PropertyChange(id=node_id, before=current, after=updated, update=item))
+        return changes
 
     def apply_rooms(self, message: Mapping[str, Any]) -> None:
         self.rooms.update(_items_by_id(list_payload(message, "rooms")))

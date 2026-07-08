@@ -627,6 +627,66 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.visible_node("light-1").params["p"], False)
         self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
 
+    async def test_command_intent_expiry_refreshes_mesh_group_node_via_group_api(self) -> None:
+        received: list[dict[str, Any]] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                set_request = parse_line(await reader.readline())
+                received.append(set_request)
+                writer.write(
+                    json.dumps({"id": set_request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8")
+                    + b"\r\n"
+                )
+                await writer.drain()
+
+                refresh_request = parse_line(await reader.readline())
+                received.append(refresh_request)
+                writer.write(
+                    json.dumps(
+                        {
+                            "id": refresh_request["id"],
+                            "groups": [{"id": 265461, "nt": 4, "params": {"p": False, "l": 30}}],
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\r\n"
+                )
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(host, port=port, command_intent_ttl=0.02)
+
+        try:
+            gateway.state.apply_topology(
+                {
+                    "nodes": [{"id": 265461, "nt": 4, "type": 3, "params": {"p": False, "l": 20}}],
+                    "groups": [{"id": 265461, "nt": 4, "params": {"p": False, "l": 20}}],
+                    "rooms": [],
+                    "scenes": [],
+                }
+            )
+            await gateway.connect()
+            await gateway.set_node_props(265461, {"p": True}, nt=4, intent_props={"p": True})
+            self.assertEqual(gateway.visible_node(265461).params["p"], True)
+            await asyncio.sleep(0.1)
+        finally:
+            await gateway.close()
+
+        self.assertEqual(
+            [request["method"] for request in received],
+            ["gateway_set.prop", "gateway_get.group"],
+        )
+        self.assertEqual(received[1]["params"], {"id": 265461})
+        self.assertEqual(gateway.state.nodes[265461].params["p"], False)
+        self.assertEqual(gateway.state.nodes[265461].params["l"], 30)
+        self.assertEqual(gateway.visible_node(265461).params["p"], False)
+        self.assertIsNot(gateway.visible_node(265461).online, False)
+        self.assertFalse(gateway.has_pending_intent(265461, ["p"]))
+
     async def test_transition_duration_does_not_extend_intent_confirmation_window(self) -> None:
         received: list[dict[str, Any]] = []
 

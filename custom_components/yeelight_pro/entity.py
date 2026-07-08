@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Iterable, Mapping
 from typing import Any, TypeVar
 
@@ -11,6 +12,8 @@ from .const import DOMAIN
 from .coordinator import YeelightProCoordinator
 from .core import ConnectionClosed, ProtocolError, RequestTimeout, TopologyNode, YeelightProError
 from .helpers import node_unique_id
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class YeelightProEntity(CoordinatorEntity[YeelightProCoordinator]):
@@ -156,6 +159,14 @@ async def async_set_node_props(
     track_intent: bool = True,
 ) -> dict[str, Any]:
     intent_props = props if track_intent else None
+    _LOGGER.debug(
+        "Yeelight Pro HA service set props: node_id=%s nt=%s props=%s duration=%s track_intent=%s",
+        node.id,
+        node.nt,
+        dict(props),
+        duration,
+        track_intent,
+    )
     return await async_call_gateway(
         coordinator.gateway.set_node_props(
             node.id,
