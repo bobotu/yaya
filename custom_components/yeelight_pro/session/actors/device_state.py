@@ -44,6 +44,7 @@ _MAX_LOG_ITEMS = 20
 StateListener = Callable[[StateSnapshotChanged], Awaitable[None] | None]
 PropertyListener = Callable[[PropertyChange], Awaitable[None] | None]
 RefreshRequester = Callable[[RefreshNodeRequestedEvent], Awaitable[None] | None]
+VisibleProjectionSignature = tuple[object, ...]
 
 
 class DeviceStateActor(Actor[DeviceStateActorMessage]):
@@ -73,6 +74,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         self._property_listeners: list[PropertyListener] = []
         self._refresh_requester: RefreshRequester | None = None
         self._refresh_timeout = max(0.0, refresh_timeout)
+        self._suppressed_snapshot_counts: dict[str, int] = {}
 
     def add_state_listener(self, listener: StateListener) -> Callable[[], None]:
         self._state_listeners.append(listener)
@@ -155,24 +157,29 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         raise TypeError(f"unsupported device state message: {type(message).__name__}")
 
     async def _apply_topology(self, message: ApplyTopologyCommand) -> None:
+        before = self._visible_projection_signature()
         topology = self.state.apply_topology(message.payload, replace=message.replace)
         await self._after_authoritative_changed(
             AuthoritativeStateChangedEvent(reason=message.reason, message=message.message),
             topology_changed=True,
             active_topology_node_ids={node.id for node in topology.nodes} if message.replace else None,
+            before_visible=before,
         )
 
     async def _apply_properties(self, message: ApplyPropertiesCommand) -> AppliedPropertiesResult:
+        before = self._visible_projection_signature()
         changes = tuple(self.state.apply_properties(message.payload))
         full_coverage = self.state.full_property_coverage(message.payload)
         await self._after_authoritative_changed(
             AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload, changes=changes),
             topology_changed=False,
             active_topology_node_ids=None,
+            before_visible=before,
         )
         return AppliedPropertiesResult(changes=changes, full_property_coverage=full_coverage)
 
     async def _apply_groups(self, message: ApplyGroupsCommand) -> None:
+        before = self._visible_projection_signature()
         changes = tuple(self.state.apply_groups(message.payload))
         if message.reason is None:
             if changes:
@@ -184,14 +191,17 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload, changes=changes),
             topology_changed=False,
             active_topology_node_ids=None,
+            before_visible=before,
         )
 
     async def _apply_generic_message(self, message: ApplyGenericStateMessageCommand) -> None:
+        before = self._visible_projection_signature()
         self.state.apply_message(message.payload)
         await self._after_authoritative_changed(
             AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload),
             topology_changed=message.reason in {StateChangeReason.TOPOLOGY_PUSH, StateChangeReason.TOPOLOGY_SYNC},
             active_topology_node_ids=None,
+            before_visible=before,
         )
 
     async def _after_authoritative_changed(
@@ -200,6 +210,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         *,
         topology_changed: bool,
         active_topology_node_ids: Iterable[str | int] | None,
+        before_visible: VisibleProjectionSignature,
     ) -> None:
         now = asyncio.get_running_loop().time()
         affected = self.intents.apply_authoritative_message(event.message, nodes=self.state.nodes, now=now)
@@ -232,10 +243,16 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             for change in event.changes:
                 await self._notify_property(change)
         if event.changes or affected or stale_affected or refreshing_affected or event.reason in snapshot_reasons:
-            await self._publish_snapshot(event.reason, event.message, event.changes)
+            await self._publish_if_visible_changed(
+                event.reason,
+                event.message,
+                before_visible=before_visible,
+                changes=event.changes,
+            )
 
     async def _record_command_intent(self, message: RecordCommandIntentCommand) -> None:
         now = asyncio.get_running_loop().time()
+        before = self._visible_projection_signature()
         affected: set[str | int] = set()
         for node_id, props in message.props_by_node.items():
             affected.update(self._clear_stale_props(node_id, props))
@@ -261,15 +278,17 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             return
         self._schedule_watchdog()
         self._rebuild_visible_cache()
-        await self._publish_snapshot(
+        await self._publish_if_visible_changed(
             StateChangeReason.COMMAND_INTENT_RECORDED,
             {
                 "method": SyntheticSessionMethod.COMMAND_INTENT_RECORDED,
                 "nodes": [{"id": node_id} for node_id in affected],
             },
+            before_visible=before,
         )
 
     async def _handle_sync_started(self) -> None:
+        before = self._visible_projection_signature()
         affected = self.intents.clear_all()
         self._cancel_watchdog()
         _LOGGER.debug(
@@ -278,14 +297,16 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         )
         if affected:
             self._rebuild_visible_cache()
-            await self._publish_snapshot(
+            await self._publish_if_visible_changed(
                 StateChangeReason.COMMAND_INTENT_CLEARED,
                 {"method": SyntheticSessionMethod.COMMAND_INTENT_CLEAR},
+                before_visible=before,
             )
 
     async def _handle_session_status(self, event: SessionStatusChanged) -> None:
         if event.current not in {GatewaySessionState.DISCONNECTED, GatewaySessionState.CLOSING}:
             return
+        before = self._visible_projection_signature()
         affected = self.intents.clear_all()
         self._cancel_watchdog()
         _LOGGER.debug(
@@ -296,9 +317,10 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         )
         if affected:
             self._rebuild_visible_cache()
-            await self._publish_snapshot(
+            await self._publish_if_visible_changed(
                 StateChangeReason.COMMAND_INTENT_CLEARED,
                 {"method": SyntheticSessionMethod.COMMAND_INTENT_CLEAR},
+                before_visible=before,
             )
 
     async def _expire_command_intents(self) -> None:
@@ -341,16 +363,18 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             return
 
     async def _resolve_expired_intent_refresh(self, message: ResolveExpiredIntentRefreshCommand) -> None:
+        before = self._visible_projection_signature()
         affected = self._mark_stale_from_refreshing(message.expired)
         if not affected:
             return
         self._rebuild_visible_cache()
-        await self._publish_snapshot(
+        await self._publish_if_visible_changed(
             StateChangeReason.COMMAND_INTENT_EXPIRED,
             {
                 "method": SyntheticSessionMethod.COMMAND_INTENT_EXPIRED,
                 "nodes": [{"id": node_id} for node_id in affected],
             },
+            before_visible=before,
         )
 
     def _mark_refreshing(self, expired: Iterable[Any]) -> set[str | int]:
@@ -509,6 +533,20 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             _stale_summary(self._stale_node_props),
         )
 
+    async def _publish_if_visible_changed(
+        self,
+        reason: StateChangeReason,
+        message: Mapping[str, Any],
+        *,
+        before_visible: VisibleProjectionSignature,
+        changes: tuple[Any, ...] = (),
+    ) -> None:
+        after_visible = self._visible_projection_signature()
+        if after_visible != before_visible:
+            await self._publish_snapshot(reason, message, changes)
+            return
+        self._log_suppressed_snapshot(reason, message, changes)
+
     async def _publish_snapshot(
         self,
         reason: StateChangeReason,
@@ -523,9 +561,86 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         for listener in list(self._property_listeners):
             _schedule_listener(listener, change)
 
+    def _visible_projection_signature(self) -> VisibleProjectionSignature:
+        nodes = []
+        for node_id, node in self.state.nodes.items():
+            visible = self.intents.project_visible(node)
+            node_key = _node_key(node_id)
+            if node_key in self._stale_node_props:
+                visible = replace(visible, online=False)
+            nodes.append((str(node_key if node_key is not None else node_id), _node_signature(visible)))
+        return (
+            tuple(sorted(nodes, key=lambda item: item[0])),
+            _state_mapping_signature(self.state.groups, excluded_keys=("params",)),
+            _state_mapping_signature(self.state.rooms),
+            self.intents.signature(),
+            _stale_signature(self._stale_node_props),
+        )
+
+    def _log_suppressed_snapshot(
+        self,
+        reason: StateChangeReason,
+        message: Mapping[str, Any],
+        changes: tuple[Any, ...],
+    ) -> None:
+        key = str(reason)
+        count = self._suppressed_snapshot_counts.get(key, 0) + 1
+        self._suppressed_snapshot_counts[key] = count
+        if count & (count - 1):
+            return
+        _LOGGER.debug(
+            "Yeelight Pro state snapshot suppressed: reason=%s count=%d raw_changes=%d summary=%s",
+            reason,
+            count,
+            len(changes),
+            _message_summary(message),
+        )
+
 
 def _payload_node_id(item: Mapping[str, Any]) -> str | int | None:
     return node_id_or_none(item.get("id"))
+
+
+def _node_signature(node: TopologyNode) -> tuple[object, ...]:
+    return (
+        str(node.id),
+        node.nt,
+        node.type,
+        node.product_id,
+        node.property_type,
+        node.name,
+        None if node.room_id is None else str(node.room_id),
+        node.channel_count,
+        node.component_type_ids,
+        _freeze_value(node.params),
+        node.online,
+    )
+
+
+def _stale_signature(stale: Mapping[str, tuple[str | int, set[str]]]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return tuple(sorted((node_key, tuple(sorted(props))) for node_key, (_node_id, props) in stale.items()))
+
+
+def _state_mapping_signature(
+    items: Mapping[str | int, Mapping[str, Any]],
+    *,
+    excluded_keys: Iterable[str] = (),
+) -> tuple[tuple[str, object], ...]:
+    excluded = frozenset(excluded_keys)
+    return tuple(
+        sorted(
+            (str(item_id), _freeze_value({key: value for key, value in item.items() if key not in excluded}))
+            for item_id, item in items.items()
+        )
+    )
+
+
+def _freeze_value(value: Any) -> object:
+    if isinstance(value, Mapping):
+        return tuple(sorted((str(key), _freeze_value(item)) for key, item in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_value(item) for item in value)
+    return value
 
 
 def _message_summary(message: Mapping[str, Any]) -> dict[str, Any]:

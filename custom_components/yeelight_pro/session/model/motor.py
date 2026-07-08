@@ -250,6 +250,27 @@ class MotorStateTracker:
                 )
         return {"count": len(entries), "entries": entries}
 
+    def signature(self) -> tuple[tuple[str, tuple[tuple[str, str, int, bool], ...]], ...]:
+        return tuple(
+            sorted(
+                (
+                    node_key,
+                    tuple(
+                        sorted(
+                            (
+                                track.current_prop,
+                                track.target_prop,
+                                track.target_value,
+                                track.assumed,
+                            )
+                            for track in tracks.values()
+                        )
+                    ),
+                )
+                for node_key, tracks in self._tracking.items()
+            )
+        )
+
     def _refresh_axis_from_current(
         self,
         node_id: str | int,
