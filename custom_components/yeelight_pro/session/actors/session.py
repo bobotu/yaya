@@ -194,7 +194,11 @@ class SessionActor(Actor[SessionActorMessage]):
             await self._handle_full_property_timeout(message)
             return None
         if isinstance(message, RefreshNodeCommand):
-            return await self._refresh_node(message.node_id, message.node_type)
+            return await self._refresh_node(
+                message.node_id,
+                message.node_type,
+                request_generations=message.request_generations,
+            )
         if isinstance(message, ConnectionOnlineEvent):
             await self._handle_connection_online(message)
             return None
@@ -336,7 +340,13 @@ class SessionActor(Actor[SessionActorMessage]):
             error,
         )
 
-    async def _refresh_node(self, node_id: str | int, node_type: int | None) -> JSONDict:
+    async def _refresh_node(
+        self,
+        node_id: str | int,
+        node_type: int | None,
+        *,
+        request_generations: Mapping[str, int] | None = None,
+    ) -> JSONDict:
         _LOGGER.debug("Yeelight Pro refreshing node: node_id=%s node_type=%s", node_id, node_type)
         if _is_mesh_group_node(node_type):
             result = await self._get_group(node_id)
@@ -345,11 +355,23 @@ class SessionActor(Actor[SessionActorMessage]):
                 node_id,
                 _message_summary(result),
             )
-            await self.device_state_ref.ask(ApplyGroupsCommand(payload=result, reason=StateChangeReason.NODE_REFRESH))
+            await self.device_state_ref.ask(
+                ApplyGroupsCommand(
+                    payload=result,
+                    reason=StateChangeReason.NODE_REFRESH,
+                    request_generations=None if request_generations is None else {node_id: request_generations},
+                )
+            )
             return result
         result = await self._get_node(node_id)
         _LOGGER.debug("Yeelight Pro refresh node response: node_id=%s summary=%s", node_id, _message_summary(result))
-        await self.device_state_ref.ask(ApplyPropertiesCommand(payload=result, reason=StateChangeReason.NODE_REFRESH))
+        await self.device_state_ref.ask(
+            ApplyPropertiesCommand(
+                payload=result,
+                reason=StateChangeReason.NODE_REFRESH,
+                request_generations=None if request_generations is None else {node_id: request_generations},
+            )
+        )
         return result
 
     async def _handle_rpc_push(self, event: RpcPushEvent) -> None:

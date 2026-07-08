@@ -32,13 +32,51 @@ class PendingPropertyIntent:
     generation: int
 
 
+@dataclass(frozen=True)
+class PropertyIntentGeneration:
+    node_id: str | int
+    prop: str
+    generation: int
+
+
+@dataclass(frozen=True)
+class CommandIntentToken:
+    property_generations: tuple[PropertyIntentGeneration, ...] = ()
+
+    def by_node(self) -> dict[str | int, dict[str, int]]:
+        generations: dict[str | int, dict[str, int]] = {}
+        for item in self.property_generations:
+            generations.setdefault(item.node_id, {})[item.prop] = item.generation
+        return generations
+
+
 class PropertyIntentTracker:
     """Tracks ACKed property targets until matching authoritative state arrives."""
 
     def __init__(self, *, ttl: float = COMMAND_INTENT_TTL) -> None:
         self.ttl = ttl
-        self._generation = 0
+        self._latest_requested: dict[str, dict[str, int]] = {}
         self._pending: dict[str, dict[str, PendingPropertyIntent]] = {}
+
+    def prepare(
+        self,
+        node_id: str | int,
+        props: Mapping[str, Any],
+    ) -> tuple[PropertyIntentGeneration, ...]:
+        normalized = _node_key(node_id)
+        if normalized is None:
+            return ()
+        requested_by_prop = self._latest_requested.setdefault(normalized, {})
+        generations: list[PropertyIntentGeneration] = []
+        for prop in props:
+            if not isinstance(prop, str):
+                continue
+            generation = requested_by_prop.get(prop, 0) + 1
+            requested_by_prop[prop] = generation
+            generations.append(PropertyIntentGeneration(node_id=node_id, prop=prop, generation=generation))
+        if not requested_by_prop:
+            self._latest_requested.pop(normalized, None)
+        return tuple(generations)
 
     def record(
         self,
@@ -47,18 +85,23 @@ class PropertyIntentTracker:
         *,
         now: float,
         current_params: Mapping[str, Any] | None = None,
+        generations: Mapping[str, int] | None = None,
     ) -> set[str | int]:
         del current_params
         normalized = _node_key(node_id)
         if normalized is None:
             return set()
+        if generations is None:
+            generations = {item.prop: item.generation for item in self.prepare(node_id, props)}
         pending_by_prop = self._pending.setdefault(normalized, {})
         changed = False
         expires_at = now + self.ttl
         for prop, value in props.items():
             if not isinstance(prop, str):
                 continue
-            self._generation += 1
+            generation = generations.get(prop)
+            if generation is None or not self.is_latest_requested(node_id, prop, generation):
+                continue
             pending_by_prop[prop] = PendingPropertyIntent(
                 node_id=node_id,
                 prop=prop,
@@ -66,7 +109,7 @@ class PropertyIntentTracker:
                 created_at=now,
                 updated_at=now,
                 expires_at=expires_at,
-                generation=self._generation,
+                generation=generation,
             )
             changed = True
         if not pending_by_prop:
@@ -79,6 +122,7 @@ class PropertyIntentTracker:
         params: Mapping[str, Any],
         *,
         now: float,
+        request_generations: Mapping[str, int] | None = None,
     ) -> set[str | int]:
         del now
         normalized = _node_key(node_id)
@@ -94,12 +138,20 @@ class PropertyIntentTracker:
             pending = pending_by_prop.get(prop)
             if pending is None:
                 continue
+            if request_generations is not None and request_generations.get(prop) != pending.generation:
+                continue
             if value == pending.value:
                 pending_by_prop.pop(prop, None)
                 changed = True
         if not pending_by_prop:
             self._pending.pop(normalized, None)
         return {node_id} if changed else set()
+
+    def is_latest_requested(self, node_id: str | int, prop: str, generation: int) -> bool:
+        normalized = _node_key(node_id)
+        if normalized is None:
+            return False
+        return self._latest_requested.get(normalized, {}).get(prop) == generation
 
     def project_visible(self, node: TopologyNode) -> TopologyNode:
         normalized = _node_key(node.id)
@@ -147,6 +199,7 @@ class PropertyIntentTracker:
         normalized = _node_key(node_id)
         if normalized is None:
             return set()
+        self._latest_requested.pop(normalized, None)
         pending_by_prop = self._pending.pop(normalized, None)
         if pending_by_prop is None:
             return set()
@@ -159,12 +212,14 @@ class PropertyIntentTracker:
         for node_key, pending_by_prop in list(self._pending.items()):
             if node_key in known:
                 continue
+            self._latest_requested.pop(node_key, None)
             self._pending.pop(node_key, None)
             affected.update(pending.node_id for pending in pending_by_prop.values())
         return affected
 
     def clear_all(self) -> set[str | int]:
         affected = {pending.node_id for pending in self._iter_pending()}
+        self._latest_requested.clear()
         self._pending.clear()
         return affected
 
@@ -273,6 +328,10 @@ class MotorIntentTracker:
 class ExpiredIntent:
     node_id: str | int
     props: tuple[str, ...]
+    generations: tuple[PropertyIntentGeneration, ...] = ()
+
+    def generation_by_prop(self) -> dict[str, int]:
+        return {item.prop: item.generation for item in self.generations}
 
 
 class CommandIntentRegistry:
@@ -282,14 +341,25 @@ class CommandIntentRegistry:
         self.properties = PropertyIntentTracker(ttl=ttl)
         self.motor = MotorIntentTracker(ttl=motor_tracking_ttl)
 
+    def prepare_property_intents(
+        self,
+        props_by_node: Mapping[str | int, Mapping[str, Any]],
+    ) -> CommandIntentToken:
+        generations: list[PropertyIntentGeneration] = []
+        for node_id, props in props_by_node.items():
+            generations.extend(self.properties.prepare(node_id, _trackable_property_props(props)))
+        return CommandIntentToken(property_generations=tuple(generations))
+
     def record_property_intents(
         self,
         props_by_node: Mapping[str | int, Mapping[str, Any]],
         *,
         nodes: Mapping[str | int, TopologyNode],
         now: float,
+        token: CommandIntentToken | None = None,
     ) -> set[str | int]:
         affected: set[str | int] = set()
+        generations_by_node = token.by_node() if token is not None else None
         for node_id, props in props_by_node.items():
             node = nodes.get(node_id)
             current_params = node.params if node is not None else {}
@@ -299,6 +369,7 @@ class CommandIntentRegistry:
                     _trackable_property_props(props),
                     now=now,
                     current_params=current_params,
+                    generations=None if generations_by_node is None else generations_by_node.get(node_id, {}),
                 )
             )
         return affected
@@ -318,6 +389,7 @@ class CommandIntentRegistry:
         *,
         nodes: Mapping[str | int, TopologyNode],
         now: float,
+        request_generations: Mapping[str | int, Mapping[str, int]] | None = None,
     ) -> set[str | int]:
         affected: set[str | int] = set()
         for item in _authoritative_property_items(message):
@@ -325,25 +397,53 @@ class CommandIntentRegistry:
             params = item.get("params")
             if node_id is None or not isinstance(params, Mapping):
                 continue
-            affected.update(self.properties.apply_authoritative_node(node_id, params, now=now))
+            affected.update(
+                self.properties.apply_authoritative_node(
+                    node_id,
+                    params,
+                    now=now,
+                    request_generations=None
+                    if request_generations is None
+                    else _request_generations_for_node(request_generations, node_id),
+                )
+            )
         affected.update(self.motor.apply_authoritative_message(message, nodes, now=now))
         return affected
 
     def expire_pending(self, *, now: float) -> tuple[ExpiredIntent, ...]:
-        expired: dict[str, tuple[str | int, set[str]]] = {}
+        expired: dict[str, tuple[str | int, dict[str, int]]] = {}
         for pending in self.properties.expire_pending(now=now):
             key = _node_key(pending.node_id)
             if key is None:
                 continue
-            current = expired.setdefault(key, (pending.node_id, set()))
-            current[1].add(pending.prop)
+            current = expired.setdefault(key, (pending.node_id, {}))
+            current[1][pending.prop] = pending.generation
         for track in self.motor.expire_pending(now=now):
             key = _node_key(track.node_id)
             if key is None:
                 continue
-            current = expired.setdefault(key, (track.node_id, set()))
-            current[1].update({track.current_prop, track.target_prop})
-        return tuple(ExpiredIntent(node_id=node_id, props=tuple(sorted(props))) for node_id, props in expired.values())
+            current = expired.setdefault(key, (track.node_id, {}))
+            current[1].setdefault(track.current_prop, 0)
+            current[1].setdefault(track.target_prop, 0)
+        return tuple(
+            ExpiredIntent(
+                node_id=node_id,
+                props=tuple(sorted(generations)),
+                generations=tuple(
+                    sorted(
+                        (
+                            PropertyIntentGeneration(node_id=node_id, prop=prop, generation=generation)
+                            for prop, generation in generations.items()
+                        ),
+                        key=lambda item: item.prop,
+                    )
+                ),
+            )
+            for node_id, generations in expired.values()
+        )
+
+    def is_latest_requested(self, node_id: str | int, prop: str, generation: int) -> bool:
+        return self.properties.is_latest_requested(node_id, prop, generation)
 
     def project_visible(self, node: TopologyNode) -> TopologyNode:
         visible = self.properties.project_visible(node)
@@ -391,6 +491,22 @@ def _item_id(item: Mapping[str, Any]) -> str | int | None:
 def _authoritative_property_items(message: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     yield from list_payload(message, "nodes")
     yield from list_payload(message, "groups")
+
+
+def _request_generations_for_node(
+    generations: Mapping[str | int, Mapping[str, int]],
+    node_id: str | int,
+) -> Mapping[str, int]:
+    direct = generations.get(node_id)
+    if direct is not None:
+        return direct
+    node_key = _node_key(node_id)
+    if node_key is None:
+        return {}
+    for candidate_id, candidate in generations.items():
+        if _node_key(candidate_id) == node_key:
+            return candidate
+    return {}
 
 
 def _trackable_property_props(props: Mapping[str, Any]) -> dict[str, Any]:

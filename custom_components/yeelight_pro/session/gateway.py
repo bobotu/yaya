@@ -5,7 +5,7 @@ import contextlib
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, TypeAlias
 
@@ -29,6 +29,7 @@ from .messages import (
     FullSyncSource,
     GatewayEventReceived,
     GatewayRpcRequest,
+    PrepareCommandIntentCommand,
     RecordCommandIntentCommand,
     RefreshNodeCommand,
     RefreshNodeRequestedEvent,
@@ -44,6 +45,7 @@ from .model import (
     MOTOR_CURRENT_POSITION_PROP,
     MOTOR_TARGET_ANGLE_PROP,
     MOTOR_TARGET_POSITION_PROP,
+    CommandIntentToken,
     GatewaySessionState,
     MotorTargetIntent,
 )
@@ -240,12 +242,15 @@ class YeelightProGateway:
     async def _send_node_command_batch(self, requests: tuple[_PendingSetPropRequest, ...]) -> JSONDict:
         commands: list[NodeCommand | NodeSet] = []
         intent_props_by_node: dict[str | int, dict[str, Any]] = {}
+        intent_tokens: list[CommandIntentToken] = []
         for request in requests:
             commands.extend(request.commands)
             if request.intent_props_by_node is None:
                 continue
             for node_id, props in request.intent_props_by_node.items():
                 intent_props_by_node.setdefault(node_id, {}).update(dict(props))
+            if request.intent_token is not None:
+                intent_tokens.append(request.intent_token)
 
         payload = _batched_payload_from_commands(commands)
         batch_ids = tuple(request.request_id for request in requests)
@@ -268,6 +273,7 @@ class YeelightProGateway:
                 intent_props_by_node,
                 motor_targets=tuple(targets),
                 motor_stops=tuple(stops),
+                token=_merge_intent_tokens(intent_tokens),
             )
         elif targets or stops:
             await self._record_command_intents(
@@ -392,6 +398,7 @@ class YeelightProGateway:
         *,
         motor_targets: tuple[MotorTargetIntent, ...] = (),
         motor_stops: tuple[str | int, ...] = (),
+        token: CommandIntentToken | None = None,
     ) -> None:
         _LOGGER.debug(
             "Yeelight Pro record command intents: props=%s motor_targets=%s motor_stops=%s",
@@ -404,6 +411,7 @@ class YeelightProGateway:
                 props_by_node=props_by_node,
                 motor_targets=motor_targets,
                 motor_stops=motor_stops,
+                token=token,
             )
         )
 
@@ -413,7 +421,19 @@ class YeelightProGateway:
             event.node_id,
             event.node_type,
         )
-        await self._session_ref.ask(RefreshNodeCommand(node_id=event.node_id, node_type=event.node_type))
+        await self._session_ref.ask(
+            RefreshNodeCommand(
+                node_id=event.node_id,
+                node_type=event.node_type,
+                request_generations=event.request_generations,
+            )
+        )
+
+    async def _prepare_command_intents(
+        self,
+        props_by_node: Mapping[str | int, Mapping[str, Any]],
+    ) -> CommandIntentToken:
+        return await self._state_ref.ask(PrepareCommandIntentCommand(props_by_node=props_by_node))
 
 
 @dataclass(frozen=True)
@@ -422,6 +442,7 @@ class _PendingSetPropRequest:
     commands: tuple[NodeCommand | NodeSet, ...]
     intent_props_by_node: Mapping[str | int, Mapping[str, Any]] | None
     future: asyncio.Future[JSONDict]
+    intent_token: CommandIntentToken | None = None
 
 
 @dataclass(frozen=True)
@@ -511,7 +532,13 @@ class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
                 request.request_id,
             )
             self._flush_pending()
-        self._pending.append(request)
+        try:
+            intent_token = await _maybe_prepare_command_intents(self._gateway, request.intent_props_by_node)
+        except Exception as exc:  # noqa: BLE001 - preparation failure rejects the write before enqueue.
+            if not request.future.done():
+                request.future.set_exception(exc)
+            return
+        self._pending.append(replace(request, intent_token=intent_token))
         _LOGGER.debug(
             "Yeelight Pro set_prop batcher queued: request=%s pending=%s",
             request.request_id,
@@ -764,6 +791,28 @@ def _intent_props_summary(props_by_node: Mapping[str | int, Mapping[str, Any]] |
     if not props_by_node:
         return {}
     return {str(node_id): dict(props) for node_id, props in props_by_node.items()}
+
+
+async def _maybe_prepare_command_intents(
+    gateway: Any,
+    props_by_node: Mapping[str | int, Mapping[str, Any]] | None,
+) -> CommandIntentToken | None:
+    if not props_by_node:
+        return None
+    prepare = getattr(gateway, "_prepare_command_intents", None)
+    if prepare is None:
+        return None
+    result = prepare(props_by_node)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def _merge_intent_tokens(tokens: Iterable[CommandIntentToken]) -> CommandIntentToken | None:
+    generations = tuple(generation for token in tokens for generation in token.property_generations)
+    if not generations:
+        return None
+    return CommandIntentToken(property_generations=generations)
 
 
 def _motor_targets_summary(targets: Iterable[MotorTargetIntent]) -> tuple[dict[str, Any], ...]:

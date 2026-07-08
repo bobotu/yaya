@@ -387,6 +387,61 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["p"], True)
         self.assertTrue(registry.has_pending("light-1", ["p"]))
 
+    def test_command_intent_generation_skips_superseded_ack(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=5.0)
+
+        first = registry.prepare_property_intents({"light-1": {"p": False}})
+        second = registry.prepare_property_intents({"light-1": {"p": True}})
+
+        self.assertEqual(
+            registry.record_property_intents({"light-1": {"p": False}}, nodes=state.nodes, now=10.0, token=first),
+            set(),
+        )
+        self.assertFalse(registry.has_pending("light-1", ["p"]))
+        self.assertEqual(
+            registry.record_property_intents({"light-1": {"p": True}}, nodes=state.nodes, now=11.0, token=second),
+            {"light-1"},
+        )
+        self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["p"], True)
+        self.assertTrue(registry.has_pending("light-1", ["p"]))
+
+    def test_command_intent_refresh_response_only_resolves_matching_generation(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=1.0)
+
+        first = registry.prepare_property_intents({"light-1": {"p": False}})
+        registry.record_property_intents({"light-1": {"p": False}}, nodes=state.nodes, now=10.0, token=first)
+        expired = registry.expire_pending(now=11.0)
+        second = registry.prepare_property_intents({"light-1": {"p": True}})
+        registry.record_property_intents({"light-1": {"p": True}}, nodes=state.nodes, now=11.1, token=second)
+
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"p": True}}]},
+            nodes=state.nodes,
+            now=11.2,
+            request_generations={"light-1": expired[0].generation_by_prop()},
+        )
+
+        self.assertEqual(affected, set())
+        self.assertTrue(registry.has_pending("light-1", ["p"]))
+
     def test_property_intent_partial_push_does_not_clear_other_pending_props(self) -> None:
         state = GatewayState()
         state.apply_topology(

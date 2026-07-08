@@ -3,8 +3,10 @@ from __future__ import annotations
 from .intent import (
     COMMAND_INTENT_TTL,
     CommandIntentRegistry,
+    CommandIntentToken,
     ExpiredIntent,
     PendingPropertyIntent,
+    PropertyIntentGeneration,
     PropertyIntentTracker,
 )
 from .motor import (
@@ -43,10 +45,12 @@ __all__ = [
     "MOTOR_TRACKING_TTL",
     "COMMAND_INTENT_TTL",
     "CommandIntentRegistry",
+    "CommandIntentToken",
     "ExpiredIntent",
     "MotorStateTracker",
     "MotorTargetIntent",
     "PendingPropertyIntent",
+    "PropertyIntentGeneration",
     "PropertyIntentTracker",
     "UnknownPropertyNode",
 ]

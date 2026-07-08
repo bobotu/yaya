@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TypeAlias
 
@@ -49,6 +50,7 @@ class FullPropertySyncTimedOutEvent:
 class RefreshNodeCommand:
     node_id: str | int
     node_type: int | None = None
+    request_generations: Mapping[str, int] | None = None
 
 
 SessionActorMessage: TypeAlias = (

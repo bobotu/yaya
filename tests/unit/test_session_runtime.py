@@ -23,6 +23,7 @@ from yeelight_pro.session.messages import (  # noqa: E402
     ApplyGroupsCommand,
     ApplyPropertiesCommand,
     ApplyTopologyCommand,
+    PrepareCommandIntentCommand,
     RecordCommandIntentCommand,
     SessionStatusChanged,
     StateSnapshotChanged,
@@ -425,6 +426,36 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshes, ["light-1"])
         self.assertIs(state.visible_node("light-1").online, False)
         self.assertEqual(state.diagnostics()["stale"], [{"node_id": "light-1", "properties": ["p"]}])
+        await state.close()
+
+    async def test_device_state_ignores_superseded_refresh_response_for_newer_intent(self) -> None:
+        state = DeviceStateActor()
+        state_ref = ActorRef(state)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload=_topology(True),
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        first = await state_ref.ask(PrepareCommandIntentCommand({"light-1": {"p": False}}))
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": False}}, token=first))
+
+        second = await state_ref.ask(PrepareCommandIntentCommand({"light-1": {"p": True}}))
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}, token=second))
+        self.assertTrue(state.has_pending("light-1", ["p"]))
+        await state_ref.ask(
+            ApplyPropertiesCommand(
+                payload={"method": "gateway_get.node", "nodes": [{"id": "light-1", "params": {"p": True}}]},
+                reason="node refresh",
+                request_generations=first.by_node(),
+            )
+        )
+
+        self.assertTrue(state.has_pending("light-1", ["p"]))
+        self.assertEqual(state.visible_node("light-1").params["p"], True)
+        self.assertEqual(state.diagnostics()["stale"], [])
         await state.close()
 
     async def test_device_state_expiry_marks_node_unavailable_only_after_refresh_fails(self) -> None:
