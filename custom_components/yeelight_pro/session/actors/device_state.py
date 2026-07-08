@@ -24,6 +24,7 @@ from ..messages import (
     AuthoritativeStateChangedEvent,
     DeviceStateActorMessage,
     ExpireCommandIntentsCommand,
+    PrepareCommandIntentCommand,
     RecordCommandIntentCommand,
     RefreshNodeRequestedEvent,
     ResolveExpiredIntentRefreshCommand,
@@ -66,7 +67,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             intent_kwargs["motor_tracking_ttl"] = motor_tracking_ttl
         self.intents = CommandIntentRegistry(**intent_kwargs)
         self._stale_node_props: dict[str, tuple[str | int, set[str]]] = {}
-        self._refreshing_expired_props: dict[str, tuple[str | int, set[str]]] = {}
+        self._refreshing_expired_props: dict[str, tuple[str | int, dict[str, int]]] = {}
         self._visible_nodes: dict[str | int, TopologyNode] = {}
         self._watchdog: asyncio.Task[None] | None = None
         self._state_listeners: list[StateListener] = []
@@ -139,6 +140,8 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             return None
         if isinstance(message, RecordCommandIntentCommand):
             return await self._record_command_intent(message)
+        if isinstance(message, PrepareCommandIntentCommand):
+            return self.intents.prepare_property_intents(message.props_by_node)
         if isinstance(message, SyncStartedEvent):
             return await self._handle_sync_started()
         if isinstance(message, SyncCompletedEvent):
@@ -166,7 +169,12 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         changes = tuple(self.state.apply_properties(message.payload))
         full_coverage = self.state.full_property_coverage(message.payload)
         await self._after_authoritative_changed(
-            AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload, changes=changes),
+            AuthoritativeStateChangedEvent(
+                reason=message.reason,
+                message=message.payload,
+                changes=changes,
+                request_generations=message.request_generations,
+            ),
             topology_changed=False,
             active_topology_node_ids=None,
         )
@@ -181,7 +189,12 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
                     await self._notify_property(change)
             return
         await self._after_authoritative_changed(
-            AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload, changes=changes),
+            AuthoritativeStateChangedEvent(
+                reason=message.reason,
+                message=message.payload,
+                changes=changes,
+                request_generations=message.request_generations,
+            ),
             topology_changed=False,
             active_topology_node_ids=None,
         )
@@ -202,9 +215,14 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         active_topology_node_ids: Iterable[str | int] | None,
     ) -> None:
         now = asyncio.get_running_loop().time()
-        affected = self.intents.apply_authoritative_message(event.message, nodes=self.state.nodes, now=now)
+        affected = self.intents.apply_authoritative_message(
+            event.message,
+            nodes=self.state.nodes,
+            now=now,
+            request_generations=event.request_generations,
+        )
         stale_affected = self._clear_stale_from_message(event.message)
-        refreshing_affected = self._clear_refreshing_from_message(event.message)
+        refreshing_affected = self._clear_refreshing_from_message(event.message, event.request_generations)
         _LOGGER.debug(
             "Yeelight Pro authoritative state applied: "
             "reason=%s summary=%s intent_cleared_nodes=%s stale_cleared_nodes=%s refreshing_cleared_nodes=%s",
@@ -239,11 +257,13 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         affected: set[str | int] = set()
         for node_id, props in message.props_by_node.items():
             affected.update(self._clear_stale_props(node_id, props))
+            affected.update(self._clear_refreshing_props(node_id, props))
         affected.update(
             self.intents.record_property_intents(
                 message.props_by_node,
                 nodes=self.state.nodes,
                 now=now,
+                token=message.token,
             )
         )
         affected.update(self.intents.record_motor_targets(message.motor_targets, nodes=self.state.nodes, now=now))
@@ -329,7 +349,11 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             await asyncio.wait_for(
                 _call_listener_strict(
                     self._refresh_requester,
-                    RefreshNodeRequestedEvent(node_id=item.node_id, node_type=node_type),
+                    RefreshNodeRequestedEvent(
+                        node_id=item.node_id,
+                        node_type=node_type,
+                        request_generations=item.generation_by_prop(),
+                    ),
                 ),
                 timeout=self._refresh_timeout,
             )
@@ -361,9 +385,10 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
                 continue
             current = self._refreshing_expired_props.get(node_key)
             if current is None:
-                current = (item.node_id, set())
+                current = (item.node_id, {})
                 self._refreshing_expired_props[node_key] = current
-            current[1].update(item.props)
+            generations = item.generation_by_prop()
+            current[1].update({prop: generations.get(prop, 0) for prop in item.props})
             affected.add(item.node_id)
         return affected
 
@@ -377,8 +402,15 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             if refreshing is None:
                 continue
             _refreshing_node_id, refreshing_props = refreshing
-            failed_props = {prop for prop in item.props if prop in refreshing_props}
-            refreshing_props.difference_update(failed_props)
+            item_generations = item.generation_by_prop()
+            failed_props: set[str] = set()
+            for prop in item.props:
+                generation = item_generations.get(prop, 0)
+                if refreshing_props.get(prop) != generation:
+                    continue
+                refreshing_props.pop(prop, None)
+                if generation == 0 or self.intents.is_latest_requested(item.node_id, prop, generation):
+                    failed_props.add(prop)
             if not refreshing_props:
                 self._refreshing_expired_props.pop(node_key, None)
             if not failed_props:
@@ -401,14 +433,26 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             affected.update(self._clear_stale_props(node_id, params))
         return affected
 
-    def _clear_refreshing_from_message(self, message: Mapping[str, Any]) -> set[str | int]:
+    def _clear_refreshing_from_message(
+        self,
+        message: Mapping[str, Any],
+        request_generations: Mapping[str | int, Mapping[str, int]] | None,
+    ) -> set[str | int]:
         affected: set[str | int] = set()
         for item in _authoritative_property_items(message):
             node_id = _payload_node_id(item)
             params = item.get("params")
             if node_id is None or not isinstance(params, Mapping):
                 continue
-            affected.update(self._clear_refreshing_props(node_id, params))
+            affected.update(
+                self._clear_refreshing_props(
+                    node_id,
+                    params,
+                    request_generations=None
+                    if request_generations is None
+                    else _request_generations_for_node(request_generations, node_id),
+                )
+            )
         return affected
 
     def _clear_stale_props(self, node_id: str | int, props: Iterable[str] | Mapping[str, Any]) -> set[str | int]:
@@ -436,7 +480,12 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         _LOGGER.debug("Yeelight Pro stale node cleared: node_id=%s", stale_node_id)
         return {stale_node_id}
 
-    def _clear_refreshing_props(self, node_id: str | int, props: Iterable[str] | Mapping[str, Any]) -> set[str | int]:
+    def _clear_refreshing_props(
+        self,
+        node_id: str | int,
+        props: Iterable[str] | Mapping[str, Any],
+        request_generations: Mapping[str, int] | None = None,
+    ) -> set[str | int]:
         node_key = _node_key(node_id)
         if node_key is None:
             return set()
@@ -446,8 +495,11 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         refreshing_node_id, refreshing_props = current
         before = len(refreshing_props)
         for prop in props:
-            if isinstance(prop, str):
-                refreshing_props.discard(prop)
+            if not isinstance(prop, str):
+                continue
+            if request_generations is not None and request_generations.get(prop) != refreshing_props.get(prop):
+                continue
+            refreshing_props.pop(prop, None)
         if refreshing_props:
             return {refreshing_node_id} if len(refreshing_props) != before else set()
         self._refreshing_expired_props.pop(node_key, None)
@@ -592,13 +644,29 @@ def _expired_summary(expired: Iterable[Any]) -> tuple[dict[str, Any], ...]:
     )
 
 
-def _stale_summary(stale: Mapping[str, tuple[str | int, set[str]]]) -> dict[str, tuple[str, ...]]:
+def _stale_summary(stale: Mapping[str, tuple[str | int, Iterable[str]]]) -> dict[str, tuple[str, ...]]:
     return {str(node_id): tuple(sorted(props)) for node_id, props in stale.values()}
 
 
 def _authoritative_property_items(message: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
     yield from list_payload(message, "nodes")
     yield from list_payload(message, "groups")
+
+
+def _request_generations_for_node(
+    generations: Mapping[str | int, Mapping[str, int]],
+    node_id: str | int,
+) -> Mapping[str, int]:
+    direct = generations.get(node_id)
+    if direct is not None:
+        return direct
+    node_key = _node_key(node_id)
+    if node_key is None:
+        return {}
+    for candidate_id, candidate in generations.items():
+        if _node_key(candidate_id) == node_key:
+            return candidate
+    return {}
 
 
 async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
