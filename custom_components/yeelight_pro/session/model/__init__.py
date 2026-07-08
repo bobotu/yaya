@@ -4,9 +4,8 @@ from .intent import (
     COMMAND_INTENT_TTL,
     CommandIntentRegistry,
     ExpiredIntent,
-    GenericIntentTracker,
-    LightIntentTracker,
     PendingPropertyIntent,
+    PropertyIntentTracker,
 )
 from .motor import (
     MOTOR_CURRENT_ANGLE_PROP,
@@ -45,10 +44,9 @@ __all__ = [
     "COMMAND_INTENT_TTL",
     "CommandIntentRegistry",
     "ExpiredIntent",
-    "GenericIntentTracker",
-    "LightIntentTracker",
     "MotorStateTracker",
     "MotorTargetIntent",
     "PendingPropertyIntent",
+    "PropertyIntentTracker",
     "UnknownPropertyNode",
 ]

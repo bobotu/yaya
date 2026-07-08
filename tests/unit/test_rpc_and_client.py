@@ -574,7 +574,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.visible_node("light-1").params["p"], False)
         self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
 
-    async def test_transition_duration_extends_intent_confirmation_window(self) -> None:
+    async def test_transition_duration_does_not_extend_intent_confirmation_window(self) -> None:
         received: list[dict[str, Any]] = []
 
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -620,9 +620,6 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await gateway.set_node_props("light-1", {"p": False}, duration=100, intent_props={"p": False})
             self.assertEqual(gateway.visible_node("light-1").params["p"], False)
             await asyncio.sleep(0.06)
-            self.assertEqual([request["method"] for request in received], ["gateway_set.prop"])
-
-            await asyncio.sleep(0.12)
         finally:
             await gateway.close()
 

@@ -35,7 +35,6 @@ class RefreshNodeRequestedEvent:
 @dataclass(frozen=True)
 class RecordCommandIntentCommand:
     props_by_node: Mapping[str | int, Mapping[str, Any]]
-    ttl_by_node: Mapping[str | int, float] | None = None
     motor_targets: tuple[MotorTargetIntent, ...] = ()
     motor_stops: tuple[str | int, ...] = ()
 

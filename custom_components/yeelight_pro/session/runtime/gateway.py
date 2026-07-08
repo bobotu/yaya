@@ -155,14 +155,12 @@ class YeelightProRuntime:
         self,
         props_by_node: Mapping[str | int, Mapping[str, Any]],
         *,
-        ttl_by_node: Mapping[str | int, float] | None = None,
         motor_targets: tuple[MotorTargetIntent, ...] = (),
         motor_stops: tuple[str | int, ...] = (),
     ) -> None:
         await self.state_ref.ask(
             RecordCommandIntentCommand(
                 props_by_node=props_by_node,
-                ttl_by_node=ttl_by_node,
                 motor_targets=motor_targets,
                 motor_stops=motor_stops,
             )

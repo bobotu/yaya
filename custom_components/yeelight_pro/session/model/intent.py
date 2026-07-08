@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from ...core.topology import DeviceType, TopologyNode
+from ...core.topology import TopologyNode
 from .motor import (
     MOTOR_TARGET_ANGLE_PROP,
     MOTOR_TARGET_POSITION_PROP,
@@ -15,16 +15,6 @@ from .motor import (
 )
 
 COMMAND_INTENT_TTL = 5.0
-LIGHT_INTENT_PROPS = frozenset({"p", "l", "ct", "c"})
-LIGHT_DEVICE_TYPES = frozenset(
-    {
-        int(DeviceType.LIGHT_SWITCHABLE),
-        int(DeviceType.LIGHT_BRIGHTNESS),
-        int(DeviceType.LIGHT_TEMPERATURE),
-        int(DeviceType.LIGHT_COLOR),
-        int(DeviceType.LAMP_DFT),
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -53,7 +43,6 @@ class PropertyIntentTracker:
         *,
         now: float,
         current_params: Mapping[str, Any] | None = None,
-        ttl: float | None = None,
     ) -> set[str | int]:
         normalized = _node_key(node_id)
         if normalized is None:
@@ -61,7 +50,7 @@ class PropertyIntentTracker:
         current_params = current_params or {}
         pending_by_prop = self._pending.setdefault(normalized, {})
         changed = False
-        expires_at = now + (self.ttl if ttl is None else max(0.0, ttl))
+        expires_at = now + self.ttl
         for prop, value in props.items():
             if not isinstance(prop, str):
                 continue
@@ -98,14 +87,15 @@ class PropertyIntentTracker:
         if pending_by_prop is None:
             return set()
         changed = False
-        for prop, _value in params.items():
+        for prop, value in params.items():
             if not isinstance(prop, str):
                 continue
             pending = pending_by_prop.get(prop)
             if pending is None:
                 continue
-            pending_by_prop.pop(prop, None)
-            changed = True
+            if value == pending.value:
+                pending_by_prop.pop(prop, None)
+                changed = True
         if not pending_by_prop:
             self._pending.pop(normalized, None)
         return {node_id} if changed else set()
@@ -210,53 +200,6 @@ class PropertyIntentTracker:
             yield from pending_by_prop.values()
 
 
-class LightIntentTracker(PropertyIntentTracker):
-    """Projects HA-friendly light targets while gateway transition updates are in flight."""
-
-    def apply_authoritative_node(
-        self,
-        node_id: str | int,
-        params: Mapping[str, Any],
-        *,
-        now: float,
-    ) -> set[str | int]:
-        normalized = _node_key(node_id)
-        if normalized is None:
-            return set()
-        pending_by_prop = self._pending.get(normalized)
-        if pending_by_prop is None:
-            return set()
-
-        affected: set[str | int] = set()
-        saw_transition_progress = any(prop in LIGHT_INTENT_PROPS for prop in params)
-        for prop, value in params.items():
-            if not isinstance(prop, str):
-                continue
-            pending = pending_by_prop.get(prop)
-            if pending is None:
-                continue
-            if value == pending.value:
-                pending_by_prop.pop(prop, None)
-            else:
-                pending_by_prop[prop] = replace(pending, updated_at=now, expires_at=now + self.ttl)
-            affected.add(pending.node_id)
-
-        if pending_by_prop and saw_transition_progress:
-            for prop, pending in list(pending_by_prop.items()):
-                if prop not in LIGHT_INTENT_PROPS:
-                    continue
-                pending_by_prop[prop] = replace(pending, updated_at=now, expires_at=now + self.ttl)
-                affected.add(pending.node_id)
-
-        if not pending_by_prop:
-            self._pending.pop(normalized, None)
-        return affected
-
-
-class GenericIntentTracker(PropertyIntentTracker):
-    """Exact-match property intent tracker for ordinary device properties."""
-
-
 class MotorIntentTracker:
     """Adapter around motor tracking so registry owns all in-flight command state."""
 
@@ -321,8 +264,7 @@ class CommandIntentRegistry:
     """Registry-owned command intent state for visible-state projection."""
 
     def __init__(self, *, ttl: float = COMMAND_INTENT_TTL, motor_tracking_ttl: float = MOTOR_TRACKING_TTL) -> None:
-        self.light = LightIntentTracker(ttl=ttl)
-        self.generic = GenericIntentTracker(ttl=ttl)
+        self.properties = PropertyIntentTracker(ttl=ttl)
         self.motor = MotorIntentTracker(ttl=motor_tracking_ttl)
 
     def record_property_intents(
@@ -331,17 +273,18 @@ class CommandIntentRegistry:
         *,
         nodes: Mapping[str | int, TopologyNode],
         now: float,
-        ttl_by_node: Mapping[str | int, float] | None = None,
     ) -> set[str | int]:
         affected: set[str | int] = set()
         for node_id, props in props_by_node.items():
-            light_props, generic_props = self._partition_props(node_id, props, nodes)
             node = nodes.get(node_id)
             current_params = node.params if node is not None else {}
-            ttl = ttl_by_node.get(node_id) if ttl_by_node is not None else None
-            affected.update(self.light.record(node_id, light_props, now=now, current_params=current_params, ttl=ttl))
             affected.update(
-                self.generic.record(node_id, generic_props, now=now, current_params=current_params, ttl=ttl)
+                self.properties.record(
+                    node_id,
+                    _trackable_property_props(props),
+                    now=now,
+                    current_params=current_params,
+                )
             )
         return affected
 
@@ -371,20 +314,18 @@ class CommandIntentRegistry:
                 params = item.get("params")
                 if node_id is None or not isinstance(params, Mapping):
                     continue
-                affected.update(self.light.apply_authoritative_node(node_id, params, now=now))
-                affected.update(self.generic.apply_authoritative_node(node_id, params, now=now))
+                affected.update(self.properties.apply_authoritative_node(node_id, params, now=now))
         affected.update(self.motor.apply_authoritative_message(message, nodes, now=now))
         return affected
 
     def expire_pending(self, *, now: float) -> tuple[ExpiredIntent, ...]:
         expired: dict[str, tuple[str | int, set[str]]] = {}
-        for tracker in (self.light, self.generic):
-            for pending in tracker.expire_pending(now=now):
-                key = _node_key(pending.node_id)
-                if key is None:
-                    continue
-                current = expired.setdefault(key, (pending.node_id, set()))
-                current[1].add(pending.prop)
+        for pending in self.properties.expire_pending(now=now):
+            key = _node_key(pending.node_id)
+            if key is None:
+                continue
+            current = expired.setdefault(key, (pending.node_id, set()))
+            current[1].add(pending.prop)
         for track in self.motor.expire_pending(now=now):
             key = _node_key(track.node_id)
             if key is None:
@@ -394,29 +335,25 @@ class CommandIntentRegistry:
         return tuple(ExpiredIntent(node_id=node_id, props=tuple(sorted(props))) for node_id, props in expired.values())
 
     def project_visible(self, node: TopologyNode) -> TopologyNode:
-        visible = self.generic.project_visible(node)
-        visible = self.light.project_visible(visible)
+        visible = self.properties.project_visible(node)
         return self.motor.project_visible(visible)
 
     def clear_node(self, node_id: str | int) -> set[str | int]:
-        return self.light.clear_node(node_id) | self.generic.clear_node(node_id) | self.motor.clear_node(node_id)
+        return self.properties.clear_node(node_id) | self.motor.clear_node(node_id)
 
     def clear_missing_nodes(self, node_ids: Iterable[str | int]) -> set[str | int]:
         return (
-            self.light.clear_missing_nodes(node_ids)
-            | self.generic.clear_missing_nodes(node_ids)
-            | self.motor.clear_missing_nodes(node_ids)
+            self.properties.clear_missing_nodes(node_ids) | self.motor.clear_missing_nodes(node_ids)
         )
 
     def clear_all(self) -> set[str | int]:
-        return self.light.clear_all() | self.generic.clear_all() | self.motor.clear_all()
+        return self.properties.clear_all() | self.motor.clear_all()
 
     def next_expiration(self, *, now: float) -> float | None:
         expirations = [
             value
             for value in (
-                self.light.next_expiration(now=now),
-                self.generic.next_expiration(now=now),
+                self.properties.next_expiration(now=now),
                 self.motor.next_expiration(now=now),
             )
             if value is not None
@@ -425,44 +362,30 @@ class CommandIntentRegistry:
 
     def has_pending(self, node_id: str | int, props: Iterable[str] | None = None) -> bool:
         return (
-            self.light.has_pending(node_id, props)
-            or self.generic.has_pending(node_id, props)
+            self.properties.has_pending(node_id, props)
             or (props is None and self.motor.has_tracking(node_id))
         )
 
     def diagnostics(self, *, now: float) -> dict[str, Any]:
-        light_entries = self.light.diagnostics(now=now)
-        generic_entries = self.generic.diagnostics(now=now)
+        property_entries = self.properties.diagnostics(now=now)
         return {
-            "count": len(light_entries) + len(generic_entries),
-            "light": light_entries,
-            "generic": generic_entries,
+            "count": len(property_entries),
+            "properties": property_entries,
             "motor": self.motor.diagnostics(now=now),
         }
-
-    def _partition_props(
-        self,
-        node_id: str | int,
-        props: Mapping[str, Any],
-        nodes: Mapping[str | int, TopologyNode],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        node = nodes.get(node_id)
-        is_light = node is not None and node.type in LIGHT_DEVICE_TYPES
-        light_props: dict[str, Any] = {}
-        generic_props: dict[str, Any] = {}
-        for prop, value in props.items():
-            if not isinstance(prop, str):
-                continue
-            if is_light and prop in LIGHT_INTENT_PROPS:
-                light_props[prop] = value
-            elif prop not in {MOTOR_TARGET_POSITION_PROP, MOTOR_TARGET_ANGLE_PROP}:
-                generic_props[prop] = value
-        return light_props, generic_props
 
 
 def _item_id(item: Mapping[str, Any]) -> str | int | None:
     item_id = item.get("id")
     return item_id if isinstance(item_id, (str, int)) and not isinstance(item_id, bool) else None
+
+
+def _trackable_property_props(props: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        prop: value
+        for prop, value in props.items()
+        if isinstance(prop, str) and prop not in {MOTOR_TARGET_POSITION_PROP, MOTOR_TARGET_ANGLE_PROP}
+    }
 
 
 def _node_key(node_id: object) -> str | None:

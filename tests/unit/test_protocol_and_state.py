@@ -21,9 +21,9 @@ from yeelight_pro.session.model import (  # noqa: E402
     MOTOR_TRACKING_TARGET_POSITION,
     CommandIntentRegistry,
     GatewayState,
-    GenericIntentTracker,
     MotorStateTracker,
     MotorTargetIntent,
+    PropertyIntentTracker,
 )
 
 
@@ -324,7 +324,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(expired[0].props, ("l",))
         self.assertFalse(registry.has_pending("light-1"))
 
-    def test_light_intent_refreshes_on_transition_progress_for_other_light_props(self) -> None:
+    def test_command_intent_keeps_target_projection_when_authoritative_value_is_stale(self) -> None:
         state = GatewayState()
         state.apply_topology(
             {
@@ -338,24 +338,25 @@ class ProtocolAndStateTests(unittest.TestCase):
 
         registry.record_property_intents({"light-1": {"p": False}}, nodes=state.nodes, now=10.0)
         affected = registry.apply_authoritative_message(
-            {"nodes": [{"id": "light-1", "params": {"l": 40}}]},
+            {"nodes": [{"id": "light-1", "params": {"p": True, "l": 40}}]},
             nodes=state.nodes,
-            now=14.0,
+            now=12.0,
+        )
+
+        self.assertEqual(affected, set())
+        self.assertFalse(registry.project_visible(state.nodes["light-1"]).params["p"])
+        self.assertTrue(registry.has_pending("light-1", ["p"]))
+
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"p": False}}]},
+            nodes=state.nodes,
+            now=13.0,
         )
 
         self.assertEqual(affected, {"light-1"})
-        self.assertFalse(registry.project_visible(state.nodes["light-1"]).params["p"])
-        self.assertTrue(registry.has_pending("light-1", ["p"]))
-        self.assertEqual(registry.expire_pending(now=15.1), ())
-
-        registry.apply_authoritative_message(
-            {"nodes": [{"id": "light-1", "params": {"p": False}}]},
-            nodes=state.nodes,
-            now=16.0,
-        )
         self.assertFalse(registry.has_pending("light-1", ["p"]))
 
-    def test_generic_intent_conflicting_push_clears_projection(self) -> None:
+    def test_property_intent_conflicting_push_does_not_clear_projection(self) -> None:
         state = GatewayState()
         state.apply_topology(
             {
@@ -376,9 +377,9 @@ class ProtocolAndStateTests(unittest.TestCase):
             now=12.0,
         )
 
-        self.assertEqual(affected, {"switch-1"})
-        self.assertFalse(registry.has_pending("switch-1", ["2-sp"]))
-        self.assertTrue(registry.project_visible(state.nodes["switch-1"]).params["2-sp"])
+        self.assertEqual(affected, set())
+        self.assertTrue(registry.has_pending("switch-1", ["2-sp"]))
+        self.assertFalse(registry.project_visible(state.nodes["switch-1"]).params["2-sp"])
 
     def test_command_intent_registry_clears_by_node_and_missing_topology(self) -> None:
         state = GatewayState()
@@ -406,7 +407,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertTrue(registry.has_pending("light-1"))
         self.assertTrue(registry.has_pending("switch-1"))
 
-        self.assertEqual(registry.light.clear_props("light-1", ["p"]), {"light-1"})
+        self.assertEqual(registry.properties.clear_props("light-1", ["p"]), {"light-1"})
         self.assertFalse(registry.has_pending("light-1", ["p"]))
         self.assertTrue(registry.has_pending("light-1", ["l"]))
 
@@ -418,7 +419,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertFalse(registry.has_pending("switch-1"))
 
     def test_property_intent_tracker_ignores_invalid_node_and_property_keys(self) -> None:
-        tracker = GenericIntentTracker(ttl=5.0)
+        tracker = PropertyIntentTracker(ttl=5.0)
 
         self.assertEqual(tracker.record(True, {"p": True}, now=1.0), set())
         self.assertEqual(tracker.record("light-1", {"p": True, 1: "bad"}, now=1.0), {"light-1"})

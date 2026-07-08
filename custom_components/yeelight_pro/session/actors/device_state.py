@@ -201,7 +201,6 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
                 message.props_by_node,
                 nodes=self.state.nodes,
                 now=now,
-                ttl_by_node=message.ttl_by_node,
             )
         )
         affected.update(self.intents.record_motor_targets(message.motor_targets, nodes=self.state.nodes, now=now))

@@ -209,11 +209,6 @@ class YeelightProGateway:
         if intent_props_by_node:
             await self._runtime.record_command_intents(
                 intent_props_by_node,
-                ttl_by_node=_intent_ttl_by_node(
-                    commands,
-                    intent_props_by_node,
-                    base_ttl=self.command_intent_ttl,
-                ),
                 motor_targets=tuple(targets),
                 motor_stops=tuple(stops),
             )
@@ -595,21 +590,6 @@ def _is_motor_pause(action: object) -> bool:
     if not isinstance(motor_adjust, Mapping):
         return False
     return motor_adjust.get("type") == str(MotorAction.PAUSE)
-
-
-def _intent_ttl_by_node(
-    commands: Iterable[NodeCommand | NodeSet],
-    intent_props_by_node: Mapping[str | int, Mapping[str, Any]],
-    *,
-    base_ttl: float,
-) -> dict[str | int, float]:
-    ttls: dict[str | int, float] = {}
-    for command in commands:
-        if command.id not in intent_props_by_node or command.duration is None:
-            continue
-        ttl = max(base_ttl, command.duration / 1000 + base_ttl)
-        ttls[command.id] = max(ttls.get(command.id, 0.0), ttl)
-    return ttls
 
 
 def _raise_for_missing_write_ack(method: str, response: Mapping[str, Any]) -> None:
