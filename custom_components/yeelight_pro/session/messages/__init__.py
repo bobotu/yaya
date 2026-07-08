@@ -38,6 +38,7 @@ from .state import (
     ExpireCommandIntentsCommand,
     RecordCommandIntentCommand,
     RefreshNodeRequestedEvent,
+    ResolveExpiredIntentRefreshCommand,
     SyncCompletedEvent,
     SyncStartedEvent,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "ReconnectFailedEvent",
     "RefreshNodeCommand",
     "RefreshNodeRequestedEvent",
+    "ResolveExpiredIntentRefreshCommand",
     "RpcPushCommand",
     "RpcPushEvent",
     "SessionActorMessage",

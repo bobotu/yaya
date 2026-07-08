@@ -356,6 +356,61 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(affected, {"light-1"})
         self.assertFalse(registry.has_pending("light-1", ["p"]))
 
+    def test_command_intent_records_noop_ack_to_guard_against_stale_push(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=5.0)
+
+        self.assertEqual(
+            registry.record_property_intents({"light-1": {"p": True}}, nodes=state.nodes, now=10.0), {"light-1"}
+        )
+        self.assertTrue(registry.has_pending("light-1", ["p"]))
+
+        changes = state.apply_properties(
+            {"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": False}}]}
+        )
+        self.assertEqual(changes[0].after.params["p"], False)
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"p": False}}]},
+            nodes=state.nodes,
+            now=11.0,
+        )
+
+        self.assertEqual(affected, set())
+        self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["p"], True)
+        self.assertTrue(registry.has_pending("light-1", ["p"]))
+
+    def test_property_intent_partial_push_does_not_clear_other_pending_props(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True, "l": 50}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=5.0)
+
+        registry.record_property_intents({"light-1": {"p": True, "l": 80}}, nodes=state.nodes, now=10.0)
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"p": True}}]},
+            nodes=state.nodes,
+            now=11.0,
+        )
+
+        self.assertEqual(affected, {"light-1"})
+        self.assertFalse(registry.has_pending("light-1", ["p"]))
+        self.assertTrue(registry.has_pending("light-1", ["l"]))
+        self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["l"], 80)
+
     def test_property_intent_conflicting_push_does_not_clear_projection(self) -> None:
         state = GatewayState()
         state.apply_topology(

@@ -776,7 +776,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(gateway.visible_node("light-1").params["p"], False)
             await gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True})
             self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
+            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
         finally:
             await gateway.close()
 

@@ -26,6 +26,7 @@ from ..messages import (
     ExpireCommandIntentsCommand,
     RecordCommandIntentCommand,
     RefreshNodeRequestedEvent,
+    ResolveExpiredIntentRefreshCommand,
     SessionStatusChanged,
     StateChangeReason,
     StateSnapshotChanged,
@@ -36,7 +37,7 @@ from ..messages import (
 from ..model.intent import CommandIntentRegistry
 from ..model.state import GatewayState
 from ..model.status import GatewaySessionState
-from .base import Actor, create_actor_task
+from .base import Actor, ActorClosed, ActorRef, create_actor_task
 
 _LOGGER = logging.getLogger(__name__)
 _MAX_LOG_ITEMS = 20
@@ -48,8 +49,15 @@ RefreshRequester = Callable[[RefreshNodeRequestedEvent], Awaitable[None] | None]
 class DeviceStateActor(Actor[DeviceStateActorMessage]):
     """Owns authoritative gateway state and registry-owned command intents."""
 
-    def __init__(self, *, ttl: float | None = None, motor_tracking_ttl: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ttl: float | None = None,
+        motor_tracking_ttl: float | None = None,
+        refresh_timeout: float = 5.0,
+    ) -> None:
         super().__init__("yeelight-pro-device-state")
+        self._ref: ActorRef[DeviceStateActorMessage] = ActorRef(self)
         self.state = GatewayState()
         intent_kwargs: dict[str, float] = {}
         if ttl is not None:
@@ -58,11 +66,13 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             intent_kwargs["motor_tracking_ttl"] = motor_tracking_ttl
         self.intents = CommandIntentRegistry(**intent_kwargs)
         self._stale_node_props: dict[str, tuple[str | int, set[str]]] = {}
+        self._refreshing_expired_props: dict[str, tuple[str | int, set[str]]] = {}
         self._visible_nodes: dict[str | int, TopologyNode] = {}
         self._watchdog: asyncio.Task[None] | None = None
         self._state_listeners: list[StateListener] = []
         self._property_listeners: list[PropertyListener] = []
         self._refresh_requester: RefreshRequester | None = None
+        self._refresh_timeout = max(0.0, refresh_timeout)
 
     def add_state_listener(self, listener: StateListener) -> Callable[[], None]:
         self._state_listeners.append(listener)
@@ -98,6 +108,10 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         diagnostics = self.intents.diagnostics(now=asyncio.get_running_loop().time())
         diagnostics["stale"] = [
             {"node_id": str(node_id), "properties": sorted(props)} for node_id, props in self._stale_node_props.values()
+        ]
+        diagnostics["refreshing"] = [
+            {"node_id": str(node_id), "properties": sorted(props)}
+            for node_id, props in self._refreshing_expired_props.values()
         ]
         return diagnostics
 
@@ -136,6 +150,8 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             return await self._handle_session_status(message)
         if isinstance(message, ExpireCommandIntentsCommand):
             return await self._expire_command_intents()
+        if isinstance(message, ResolveExpiredIntentRefreshCommand):
+            return await self._resolve_expired_intent_refresh(message)
         raise TypeError(f"unsupported device state message: {type(message).__name__}")
 
     async def _apply_topology(self, message: ApplyTopologyCommand) -> None:
@@ -188,17 +204,20 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         now = asyncio.get_running_loop().time()
         affected = self.intents.apply_authoritative_message(event.message, nodes=self.state.nodes, now=now)
         stale_affected = self._clear_stale_from_message(event.message)
+        refreshing_affected = self._clear_refreshing_from_message(event.message)
         _LOGGER.debug(
             "Yeelight Pro authoritative state applied: "
-            "reason=%s summary=%s intent_cleared_nodes=%s stale_cleared_nodes=%s",
+            "reason=%s summary=%s intent_cleared_nodes=%s stale_cleared_nodes=%s refreshing_cleared_nodes=%s",
             event.reason,
             _message_summary(event.message),
             sorted(str(node_id) for node_id in affected),
             sorted(str(node_id) for node_id in stale_affected),
+            sorted(str(node_id) for node_id in refreshing_affected),
         )
         if topology_changed and active_topology_node_ids is not None:
             affected.update(self.intents.clear_missing_nodes(active_topology_node_ids))
             stale_affected.update(self._clear_missing_stale_nodes(active_topology_node_ids))
+            refreshing_affected.update(self._clear_missing_refreshing_nodes(active_topology_node_ids))
         if affected:
             self._schedule_watchdog()
         self._rebuild_visible_cache()
@@ -212,7 +231,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         if event.changes:
             for change in event.changes:
                 await self._notify_property(change)
-        if event.changes or affected or stale_affected or event.reason in snapshot_reasons:
+        if event.changes or affected or stale_affected or refreshing_affected or event.reason in snapshot_reasons:
             await self._publish_snapshot(event.reason, event.message, event.changes)
 
     async def _record_command_intent(self, message: RecordCommandIntentCommand) -> None:
@@ -284,14 +303,45 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
 
     async def _expire_command_intents(self) -> None:
         expired = self.intents.expire_pending(now=asyncio.get_running_loop().time())
-        affected = self._mark_stale(expired)
+        affected = self._mark_refreshing(expired)
         _LOGGER.debug(
-            "Yeelight Pro command intents expired: expired=%s affected=%s stale=%s",
+            "Yeelight Pro command intents expired, requesting refresh: expired=%s affected=%s refreshing=%s",
             _expired_summary(expired),
             sorted(str(node_id) for node_id in affected),
-            _stale_summary(self._stale_node_props),
+            _stale_summary(self._refreshing_expired_props),
         )
         self._schedule_watchdog()
+        if not affected:
+            return
+        if self._refresh_requester is None:
+            await self._resolve_expired_intent_refresh(ResolveExpiredIntentRefreshCommand(expired=expired, failed=True))
+            return
+        for item in expired:
+            node = self.state.nodes.get(item.node_id)
+            create_actor_task(
+                self._refresh_expired_intent(item, node_type=node.nt if node is not None else None),
+                name=f"yeelight-pro-refresh-node-{item.node_id}",
+            )
+
+    async def _refresh_expired_intent(self, item: Any, *, node_type: int | None) -> None:
+        failed = False
+        try:
+            await asyncio.wait_for(
+                _call_listener_strict(
+                    self._refresh_requester,
+                    RefreshNodeRequestedEvent(node_id=item.node_id, node_type=node_type),
+                ),
+                timeout=self._refresh_timeout,
+            )
+        except Exception:  # noqa: BLE001 - stale fallback is intentionally conservative on refresh failure.
+            failed = True
+        try:
+            await self._ref.tell(ResolveExpiredIntentRefreshCommand(expired=(item,), failed=failed))
+        except ActorClosed:
+            return
+
+    async def _resolve_expired_intent_refresh(self, message: ResolveExpiredIntentRefreshCommand) -> None:
+        affected = self._mark_stale_from_refreshing(message.expired)
         if not affected:
             return
         self._rebuild_visible_cache()
@@ -302,29 +352,42 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
                 "nodes": [{"id": node_id} for node_id in affected],
             },
         )
-        if self._refresh_requester is None:
-            return
-        for node_id in affected:
-            node = self.state.nodes.get(node_id)
-            create_actor_task(
-                _call_listener(
-                    self._refresh_requester,
-                    RefreshNodeRequestedEvent(node_id=node_id, node_type=node.nt if node is not None else None),
-                ),
-                name=f"yeelight-pro-refresh-node-{node_id}",
-            )
 
-    def _mark_stale(self, expired: Iterable[Any]) -> set[str | int]:
+    def _mark_refreshing(self, expired: Iterable[Any]) -> set[str | int]:
         affected: set[str | int] = set()
         for item in expired:
             node_key = _node_key(item.node_id)
             if node_key is None:
                 continue
-            current = self._stale_node_props.get(node_key)
+            current = self._refreshing_expired_props.get(node_key)
             if current is None:
                 current = (item.node_id, set())
-                self._stale_node_props[node_key] = current
+                self._refreshing_expired_props[node_key] = current
             current[1].update(item.props)
+            affected.add(item.node_id)
+        return affected
+
+    def _mark_stale_from_refreshing(self, expired: Iterable[Any]) -> set[str | int]:
+        affected: set[str | int] = set()
+        for item in expired:
+            node_key = _node_key(item.node_id)
+            if node_key is None:
+                continue
+            refreshing = self._refreshing_expired_props.get(node_key)
+            if refreshing is None:
+                continue
+            _refreshing_node_id, refreshing_props = refreshing
+            failed_props = {prop for prop in item.props if prop in refreshing_props}
+            refreshing_props.difference_update(failed_props)
+            if not refreshing_props:
+                self._refreshing_expired_props.pop(node_key, None)
+            if not failed_props:
+                continue
+            stale = self._stale_node_props.get(node_key)
+            if stale is None:
+                stale = (item.node_id, set())
+                self._stale_node_props[node_key] = stale
+            stale[1].update(failed_props)
             affected.add(item.node_id)
         return affected
 
@@ -336,6 +399,16 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             if node_id is None or not isinstance(params, Mapping):
                 continue
             affected.update(self._clear_stale_props(node_id, params))
+        return affected
+
+    def _clear_refreshing_from_message(self, message: Mapping[str, Any]) -> set[str | int]:
+        affected: set[str | int] = set()
+        for item in _authoritative_property_items(message):
+            node_id = _payload_node_id(item)
+            params = item.get("params")
+            if node_id is None or not isinstance(params, Mapping):
+                continue
+            affected.update(self._clear_refreshing_props(node_id, params))
         return affected
 
     def _clear_stale_props(self, node_id: str | int, props: Iterable[str] | Mapping[str, Any]) -> set[str | int]:
@@ -363,6 +436,23 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         _LOGGER.debug("Yeelight Pro stale node cleared: node_id=%s", stale_node_id)
         return {stale_node_id}
 
+    def _clear_refreshing_props(self, node_id: str | int, props: Iterable[str] | Mapping[str, Any]) -> set[str | int]:
+        node_key = _node_key(node_id)
+        if node_key is None:
+            return set()
+        current = self._refreshing_expired_props.get(node_key)
+        if current is None:
+            return set()
+        refreshing_node_id, refreshing_props = current
+        before = len(refreshing_props)
+        for prop in props:
+            if isinstance(prop, str):
+                refreshing_props.discard(prop)
+        if refreshing_props:
+            return {refreshing_node_id} if len(refreshing_props) != before else set()
+        self._refreshing_expired_props.pop(node_key, None)
+        return {refreshing_node_id}
+
     def _clear_missing_stale_nodes(self, node_ids: Iterable[str | int]) -> set[str | int]:
         known = {_node_key(node_id) for node_id in node_ids}
         known.discard(None)
@@ -371,6 +461,17 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             if node_key in known:
                 continue
             self._stale_node_props.pop(node_key, None)
+            affected.add(node_id)
+        return affected
+
+    def _clear_missing_refreshing_nodes(self, node_ids: Iterable[str | int]) -> set[str | int]:
+        known = {_node_key(node_id) for node_id in node_ids}
+        known.discard(None)
+        affected: set[str | int] = set()
+        for node_key, (node_id, _props) in list(self._refreshing_expired_props.items()):
+            if node_key in known:
+                continue
+            self._refreshing_expired_props.pop(node_key, None)
             affected.add(node_id)
         return affected
 
@@ -507,6 +608,14 @@ async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
             await result
     except Exception:  # noqa: BLE001 - HA boundary listeners must not kill actors.
         _LOGGER.exception("Yeelight Pro device state listener failed")
+
+
+async def _call_listener_strict(listener: Callable[..., Any] | None, *args: Any) -> None:
+    if listener is None:
+        raise RuntimeError("refresh requester is not configured")
+    result = listener(*args)
+    if inspect.isawaitable(result):
+        await result
 
 
 def _schedule_listener(listener: Callable[..., Any], *args: Any) -> None:

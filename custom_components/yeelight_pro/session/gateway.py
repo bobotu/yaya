@@ -81,7 +81,7 @@ class YeelightProGateway:
         self._connection = ConnectionActor(self._rpc)
         self._connection_ref = ActorRef(self._connection)
         self._connection.bind_push_listener(self._connection_ref)
-        self._state_actor = DeviceStateActor(ttl=command_intent_ttl)
+        self._state_actor = DeviceStateActor(ttl=command_intent_ttl, refresh_timeout=request_timeout)
         self._state_ref = ActorRef(self._state_actor)
         self._session = SessionActor(connection_ref=self._connection_ref, device_state_ref=self._state_ref)
         self._session_ref = ActorRef(self._session)
