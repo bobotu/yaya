@@ -69,6 +69,11 @@ class FakeGateway:
         self.connected = False
         self.commands: list[NodeCommand] = []
         self.next_set_node_props_error: Exception | None = None
+        self.block_set_node_props = False
+        self.set_node_props_concurrent = asyncio.Event()
+        self.release_set_node_props = asyncio.Event()
+        self.max_concurrent_set_node_props = 0
+        self._active_set_node_props = 0
         self.refreshed_node_ids: list[str | int] = []
         self.sync_kwargs: list[dict[str, Any]] = []
         self._intents = CommandIntentRegistry()
@@ -135,18 +140,27 @@ class FakeGateway:
         intent_props: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.commands.append(NodeCommand(id=node_id, nt=nt, props=props, duration=duration))
-        if self.next_set_node_props_error is not None:
-            error = self.next_set_node_props_error
-            self.next_set_node_props_error = None
-            raise error
-        if intent_props:
-            self._intents.record_property_intents(
-                {node_id: intent_props},
-                nodes=self.state.nodes,
-                now=asyncio.get_running_loop().time(),
-            )
-            self._notify_state({"method": "gateway_intent.recorded"})
-        return {"result": "ok"}
+        self._active_set_node_props += 1
+        self.max_concurrent_set_node_props = max(self.max_concurrent_set_node_props, self._active_set_node_props)
+        if self._active_set_node_props >= 2:
+            self.set_node_props_concurrent.set()
+        try:
+            if self.block_set_node_props:
+                await self.release_set_node_props.wait()
+            if self.next_set_node_props_error is not None:
+                error = self.next_set_node_props_error
+                self.next_set_node_props_error = None
+                raise error
+            if intent_props:
+                self._intents.record_property_intents(
+                    {node_id: intent_props},
+                    nodes=self.state.nodes,
+                    now=asyncio.get_running_loop().time(),
+                )
+                self._notify_state({"method": "gateway_intent.recorded"})
+            return {"result": "ok"}
+        finally:
+            self._active_set_node_props -= 1
 
     def visible_node(self, node_id: str | int) -> Any:
         node = self.state.nodes.get(node_id)
@@ -959,6 +973,53 @@ async def test_light_service_maps_transition_and_flash(
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["action"] == {"blink": {"repeat": 4, "type": "urgent"}}
     finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_light_service_fans_out_multiple_entities_concurrently(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    fixture = deepcopy(topology_fixture)
+    fixture["nodes"].append(
+        {
+            "id": "light-2",
+            "nt": 2,
+            "type": 3,
+            "name": "Dining light",
+            "params": {"p": 1, "l": 70, "ct": 4000},
+        }
+    )
+    gateway = FakeGateway(fixture)
+    gateway.block_set_node_props = True
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        first_light_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        second_light_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-2_light")
+        service_task = asyncio.create_task(
+            hass.services.async_call(
+                "light",
+                "turn_off",
+                {ATTR_ENTITY_ID: [first_light_id, second_light_id]},
+                blocking=True,
+            )
+        )
+
+        await asyncio.wait_for(gateway.set_node_props_concurrent.wait(), timeout=1)
+        assert gateway.max_concurrent_set_node_props == 2
+        assert {command.id for command in gateway.commands[-2:]} == {"light-1", "light-2"}
+
+        gateway.release_set_node_props.set()
+        await asyncio.wait_for(service_task, timeout=1)
+        await hass.async_block_till_done()
+
+        assert [command.to_payload()["set"] for command in gateway.commands[-2:]] == [{"p": False}, {"p": False}]
+        assert hass.states.get(first_light_id).state == STATE_OFF
+        assert hass.states.get(second_light_id).state == STATE_OFF
+    finally:
+        gateway.release_set_node_props.set()
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
 
