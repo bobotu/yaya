@@ -4,6 +4,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ...core.coercion import int_or_none as _int_or_none
+from ...core.coercion import node_id_or_none
+from ...core.coercion import node_key as _node_key
 from ...core.topology import TopologyNode
 from ...core.updates import PropertyChange
 
@@ -296,24 +299,4 @@ def _motion(current_value: int | None, target_value: int) -> str | None:
 
 
 def _item_id(item: Mapping[str, Any]) -> str | int | None:
-    item_id = item.get("id")
-    return item_id if isinstance(item_id, (str, int)) and not isinstance(item_id, bool) else None
-
-
-def _int_or_none(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
-
-
-def _node_key(node_id: object) -> str | None:
-    if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
-        return None
-    return str(node_id)
+    return node_id_or_none(item.get("id"))

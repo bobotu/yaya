@@ -12,7 +12,7 @@ from .coordinator import YeelightProCoordinator
 from .core import is_knob_capable
 from .core.topology import DeviceType
 from .entity import YeelightProEntity
-from .helpers import device_type, node_unique_id, relay_channel_numbers, relay_prop_name
+from .helpers import bool_param, device_type, node_unique_id, relay_channel_numbers, relay_prop_name
 from .platform import async_add_dynamic_entities
 
 PARALLEL_UPDATES = 0
@@ -73,7 +73,7 @@ class YeelightProMotionBinarySensor(YeelightProEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return _bool_param(self.node, "mv")
+        return bool_param(self.node, "mv")
 
 
 class YeelightProOccupancyBinarySensor(YeelightProEntity, BinarySensorEntity):
@@ -85,7 +85,7 @@ class YeelightProOccupancyBinarySensor(YeelightProEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return _bool_param(self.node, "mv")
+        return bool_param(self.node, "mv")
 
 
 class YeelightProDoorBinarySensor(YeelightProEntity, BinarySensorEntity):
@@ -97,7 +97,7 @@ class YeelightProDoorBinarySensor(YeelightProEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        value = _bool_param(self.node, "dc")
+        value = bool_param(self.node, "dc")
         return None if value is None else not value
 
 
@@ -110,7 +110,7 @@ class YeelightProAlarmBinarySensor(YeelightProEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        return _bool_param(self.node, "alm")
+        return bool_param(self.node, "alm")
 
 
 class YeelightProBatteryChargingBinarySensor(YeelightProEntity, BinarySensorEntity):
@@ -123,7 +123,7 @@ class YeelightProBatteryChargingBinarySensor(YeelightProEntity, BinarySensorEnti
 
     @property
     def is_on(self) -> bool | None:
-        return _bool_param(self.node, "bc")
+        return bool_param(self.node, "bc")
 
 
 class YeelightProRelayStateBinarySensor(YeelightProEntity, BinarySensorEntity):
@@ -141,15 +141,4 @@ class YeelightProRelayStateBinarySensor(YeelightProEntity, BinarySensorEntity):
         node = self.node
         if node is None:
             return None
-        return _bool_param(node, relay_prop_name(node, self._channel))
-
-
-def _bool_param(node: Any, key: str) -> bool | None:
-    if node is None:
-        return None
-    value = node.params.get(key)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    return None
+        return bool_param(node, relay_prop_name(node, self._channel))

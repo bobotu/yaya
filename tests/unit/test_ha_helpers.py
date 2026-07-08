@@ -53,16 +53,63 @@ finally:
         sys.modules["homeassistant.const"] = _homeassistant_const
 
 button_count = helpers.button_count
+bool_param = helpers.bool_param
 event_subtypes_for_node = helpers.event_subtypes_for_node
 event_types_for_node = helpers.event_types_for_node
+indexed_props = helpers.indexed_props
+int_param = helpers.int_param
 relay_channel_numbers = helpers.relay_channel_numbers
 should_import_node = helpers.should_import_node
 switch_mode_for_node = helpers.switch_mode_for_node
 switch_node_is_relay_mode = helpers.switch_node_is_relay_mode
 switch_node_is_wireless_mode = helpers.switch_node_is_wireless_mode
+true_bool_param = helpers.true_bool_param
 
 
 class HomeAssistantHelperTests(unittest.TestCase):
+    def test_platform_param_helpers_preserve_bool_and_int_semantics(self) -> None:
+        node = TopologyNode.from_mapping(
+            {
+                "id": "helpers",
+                "nt": 2,
+                "type": 3,
+                "params": {
+                    "level": 42,
+                    "bool_value": True,
+                    "int_true": 1,
+                    "int_false": 0,
+                    "text": "1",
+                },
+            }
+        )
+
+        self.assertEqual(int_param(node, "level"), 42)
+        self.assertIsNone(int_param(node, "bool_value"))
+        self.assertIsNone(int_param(node, "text"))
+        self.assertIs(bool_param(node, "bool_value"), True)
+        self.assertIs(bool_param(node, "int_true"), True)
+        self.assertIs(bool_param(node, "int_false"), False)
+        self.assertIsNone(bool_param(node, "text"))
+        self.assertIs(true_bool_param(node, "bool_value"), True)
+        self.assertIs(true_bool_param(node, "int_true"), False)
+
+    def test_indexed_props_sorts_numeric_prefixes(self) -> None:
+        node = TopologyNode.from_mapping(
+            {
+                "id": "indexed",
+                "nt": 2,
+                "type": 10,
+                "params": {
+                    "10-acrc": True,
+                    "2-acrc": True,
+                    "not-acrc": True,
+                    "3-other": True,
+                },
+            }
+        )
+
+        self.assertEqual(indexed_props(node, "acrc"), ("2-acrc", "10-acrc"))
+
     def test_knob_panel_without_channel_metadata_exports_wide_idx_fallback(self) -> None:
         node = TopologyNode.from_mapping(
             {

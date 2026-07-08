@@ -24,7 +24,7 @@ from .core.devices import LightDevice
 from .core.devices.light import color_temp_kelvin_range
 from .core.topology import DeviceType
 from .entity import YeelightProEntity, async_call_gateway, async_set_node_props
-from .helpers import light_device_type
+from .helpers import int_param, light_device_type
 from .platform import async_add_dynamic_entities
 
 PARALLEL_UPDATES = 1
@@ -97,16 +97,16 @@ class YeelightProLight(YeelightProEntity, LightEntity):
 
     @property
     def brightness(self) -> int | None:
-        level = _int_param(self.node, "l")
+        level = int_param(self.node, "l")
         return None if level is None else round(level * 255 / 100)
 
     @property
     def color_temp_kelvin(self) -> int | None:
-        return _int_param(self.node, "ct")
+        return int_param(self.node, "ct")
 
     @property
     def rgb_color(self) -> tuple[int, int, int] | None:
-        value = _int_param(self.node, "c")
+        value = int_param(self.node, "c")
         if value is None:
             return None
         return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
@@ -145,17 +145,6 @@ class YeelightProLight(YeelightProEntity, LightEntity):
             {"p": False},
             duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION)),
         )
-
-
-def _int_param(node: Any, key: str) -> int | None:
-    if node is None:
-        return None
-    value = node.params.get(key)
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    return None
 
 
 def _rgb_to_int(rgb_color: tuple[int, int, int]) -> int:

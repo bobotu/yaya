@@ -246,3 +246,39 @@ def first_present_bool(params: dict[str, Any], keys: Iterable[str]) -> bool | No
         if isinstance(value, int) and value in (0, 1):
             return bool(value)
     return None
+
+
+def int_param(node: Any, key: str) -> int | None:
+    if node is None:
+        return None
+    value = node.params.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def bool_param(node: Any, key: str) -> bool | None:
+    if node is None:
+        return None
+    value = node.params.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    return None
+
+
+def true_bool_param(node: Any, key: str) -> bool:
+    if node is None:
+        return False
+    return node.params.get(key) is True
+
+
+def indexed_props(node: Any, suffix: str) -> tuple[str, ...]:
+    props = []
+    for key in node.params:
+        if isinstance(key, str) and key.endswith(f"-{suffix}") and key.split("-", 1)[0].isdigit():
+            props.append(key)
+    return tuple(sorted(props, key=lambda item: int(item.split("-", 1)[0])))

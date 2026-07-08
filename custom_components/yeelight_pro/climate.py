@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import YeelightProCoordinator
 from .core.topology import DeviceType
 from .entity import YeelightProEntity, async_set_node_props
-from .helpers import device_type
+from .helpers import bool_param, device_type, int_param
 from .platform import async_add_dynamic_entities
 
 PARALLEL_UPDATES = 1
@@ -104,23 +104,23 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
 
     @property
     def current_temperature(self) -> float | None:
-        value = _int_param(self.node, self._key("acct"))
+        value = int_param(self.node, self._key("acct"))
         return None if value is None else float(value)
 
     @property
     def target_temperature(self) -> float | None:
-        value = _int_param(self.node, self._key("actt"))
+        value = int_param(self.node, self._key("actt"))
         return None if value is None else float(value)
 
     @property
     def hvac_mode(self) -> HVACMode | None:
-        if _bool_param(self.node, self._key("acp")) is False:
+        if bool_param(self.node, self._key("acp")) is False:
             return HVACMode.OFF
-        return AC_MODE_TO_HVAC.get(_int_param(self.node, self._key("acm")))
+        return AC_MODE_TO_HVAC.get(int_param(self.node, self._key("acm")))
 
     @property
     def fan_mode(self) -> str | None:
-        value = _int_param(self.node, self._key("acf"))
+        value = int_param(self.node, self._key("acf"))
         return None if value is None else AC_FAN_TO_HA.get(value)
 
     async def async_turn_on(self) -> None:
@@ -180,17 +180,17 @@ class YeelightProBathHeaterClimate(YeelightProEntity, ClimateEntity):
 
     @property
     def current_temperature(self) -> float | None:
-        value = _int_param(self.node, "t")
+        value = int_param(self.node, "t")
         return None if value is None else float(value)
 
     @property
     def target_temperature(self) -> float | None:
-        value = _int_param(self.node, "tgt")
+        value = int_param(self.node, "tgt")
         return None if value is None else float(value)
 
     @property
     def hvac_mode(self) -> HVACMode | None:
-        return HVACMode.HEAT if _bool_param(self.node, "p") else HVACMode.OFF
+        return HVACMode.HEAT if bool_param(self.node, "p") else HVACMode.OFF
 
     async def async_turn_on(self) -> None:
         node = self.require_current_node()
@@ -222,25 +222,3 @@ def _air_condition_indexes(node: Any) -> tuple[int, ...]:
             if prefix.isdigit() and suffix.startswith("ac"):
                 indexes.add(int(prefix))
     return tuple(sorted(indexes)) or (1,)
-
-
-def _int_param(node: Any, key: str) -> int | None:
-    if node is None:
-        return None
-    value = node.params.get(key)
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    return None
-
-
-def _bool_param(node: Any, key: str) -> bool | None:
-    if node is None:
-        return None
-    value = node.params.get(key)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    return None
