@@ -342,9 +342,7 @@ class CommandIntentRegistry:
         return self.properties.clear_node(node_id) | self.motor.clear_node(node_id)
 
     def clear_missing_nodes(self, node_ids: Iterable[str | int]) -> set[str | int]:
-        return (
-            self.properties.clear_missing_nodes(node_ids) | self.motor.clear_missing_nodes(node_ids)
-        )
+        return self.properties.clear_missing_nodes(node_ids) | self.motor.clear_missing_nodes(node_ids)
 
     def clear_all(self) -> set[str | int]:
         return self.properties.clear_all() | self.motor.clear_all()
@@ -361,10 +359,7 @@ class CommandIntentRegistry:
         return min(expirations) if expirations else None
 
     def has_pending(self, node_id: str | int, props: Iterable[str] | None = None) -> bool:
-        return (
-            self.properties.has_pending(node_id, props)
-            or (props is None and self.motor.has_tracking(node_id))
-        )
+        return self.properties.has_pending(node_id, props) or (props is None and self.motor.has_tracking(node_id))
 
     def diagnostics(self, *, now: float) -> dict[str, Any]:
         property_entries = self.properties.diagnostics(now=now)
