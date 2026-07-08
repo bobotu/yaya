@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import YeelightProCoordinator
 from .core import GatewayEvent, is_knob_capable
 from .entity import YeelightProEntity
-from .helpers import button_count, event_data, event_types_for_node, is_programmable_node
+from .helpers import button_count, event_data, event_types_for_node, is_programmable_node, node_unique_id
 from .platform import async_add_dynamic_entities
 
 PARALLEL_UPDATES = 0
@@ -32,6 +32,16 @@ async def async_setup_entry(
             else []
         ),
         "event",
+        lambda node: _stale_event_unique_ids_for_node(coordinator, node),
+    )
+
+
+def _stale_event_unique_ids_for_node(coordinator: YeelightProCoordinator, node: Any) -> tuple[str, ...]:
+    if not is_programmable_node(node):
+        return ()
+    return tuple(
+        node_unique_id(coordinator.gateway_id, node.id, f"control_{index}_events")
+        for index in range(1, button_count(node) + 1)
     )
 
 

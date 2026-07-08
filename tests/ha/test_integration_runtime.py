@@ -542,6 +542,45 @@ async def test_wireless_switch_mode_removes_stale_relay_switch_entities(
         await hass.async_block_till_done()
 
 
+async def test_stale_entity_cleanup_does_not_match_node_id_prefix_collision(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    topology_fixture["nodes"].append(
+        {
+            "id": "aabbcc",
+            "nt": 2,
+            "type": 4,
+            "name": "Prefix light",
+            "params": {"p": True, "l": 50, "ct": 3000, "c": 16777215},
+        }
+    )
+    gateway = FakeGateway(topology_fixture)
+    registry = er.async_get(hass)
+    stale_entity_ids: list[str] = []
+
+    def create_stale_entries(entry: MockConfigEntry) -> None:
+        stale_light = registry.async_get_or_create(
+            "light",
+            DOMAIN,
+            node_unique_id("127.0.0.1:65443", "aabbcc_2", "light"),
+            config_entry=entry,
+        )
+        stale_entity_ids.append(stale_light.entity_id)
+
+    entry = await _setup_entry(hass, gateway, before_setup=create_stale_entries)
+
+    try:
+        current_light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_aabbcc_light")
+        assert hass.states.get(current_light_entity_id) is not None
+        for entity_id in stale_entity_ids:
+            assert registry.async_get(entity_id) is not None
+            assert hass.states.get(entity_id) is None
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
 async def test_knob_event_bus_payload_and_device_triggers(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],

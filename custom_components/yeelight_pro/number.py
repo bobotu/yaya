@@ -13,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import YeelightProCoordinator
 from .core.topology import DeviceType
 from .entity import YeelightProEntity, async_set_node_props
-from .helpers import device_type
+from .helpers import device_type, node_unique_id
 from .platform import async_add_dynamic_entities
 
 PARALLEL_UPDATES = 1
@@ -59,6 +59,7 @@ async def async_setup_entry(
         async_add_entities,
         lambda node: _number_entities_for_node(coordinator, node),
         "number",
+        lambda node: _stale_number_unique_ids_for_node(coordinator, node),
     )
 
 
@@ -87,6 +88,12 @@ def _number_entities_for_node(coordinator: YeelightProCoordinator, node: Any) ->
             if description.key in node.params
         )
     return entities
+
+
+def _stale_number_unique_ids_for_node(coordinator: YeelightProCoordinator, node: Any) -> tuple[str, ...]:
+    if device_type(node) not in {DeviceType.AIR_CONDITION, DeviceType.AIR_CONDITION_VRF}:
+        return ()
+    return tuple(node_unique_id(coordinator.gateway_id, node.id, key) for key in _indexed_props(node, "acd"))
 
 
 class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
