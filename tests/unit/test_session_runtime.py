@@ -293,6 +293,109 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.visible_node("light-1").params["p"], False)
         await state.close()
 
+    async def test_device_state_suppresses_mismatched_push_hidden_by_intent(self) -> None:
+        state = DeviceStateActor()
+        state_ref = ActorRef(state)
+        snapshots: list[StateSnapshotChanged] = []
+        state.add_state_listener(snapshots.append)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload=_topology(False),
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
+        await asyncio.sleep(0)
+        snapshots.clear()
+
+        with self.assertLogs("yeelight_pro.session.actors.device_state", level="DEBUG") as logs:
+            await state_ref.ask(
+                ApplyPropertiesCommand(
+                    payload={"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": False}}]},
+                    reason="property push",
+                )
+            )
+            await asyncio.sleep(0)
+
+        self.assertEqual(state.state.nodes["light-1"].params["p"], False)
+        self.assertEqual(state.visible_node("light-1").params["p"], True)
+        self.assertTrue(state.has_pending("light-1", ["p"]))
+        self.assertEqual(snapshots, [])
+        self.assertTrue(any("state snapshot suppressed" in message for message in logs.output))
+
+        await state.close()
+
+    async def test_device_state_publishes_target_confirmation_for_assumed_state_change(self) -> None:
+        state = DeviceStateActor()
+        state_ref = ActorRef(state)
+        snapshots: list[StateSnapshotChanged] = []
+        state.add_state_listener(snapshots.append)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload=_topology(False),
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
+        await asyncio.sleep(0)
+        snapshots.clear()
+
+        await state_ref.ask(
+            ApplyPropertiesCommand(
+                payload={"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": True}}]},
+                reason="property push",
+            )
+        )
+        await asyncio.sleep(0)
+
+        self.assertEqual(state.visible_node("light-1").params["p"], True)
+        self.assertFalse(state.has_pending("light-1", ["p"]))
+        self.assertEqual([snapshot.reason for snapshot in snapshots], ["property push"])
+
+        await state.close()
+
+    async def test_device_state_suppresses_group_refresh_hidden_by_intent(self) -> None:
+        state = DeviceStateActor()
+        state_ref = ActorRef(state)
+        snapshots: list[StateSnapshotChanged] = []
+        state.add_state_listener(snapshots.append)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload={
+                    "nodes": [{"id": 265461, "nt": 4, "type": 3, "params": {"p": True}}],
+                    "groups": [{"id": 265461, "nt": 4, "params": {"p": True}}],
+                    "rooms": [],
+                    "scenes": [],
+                },
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({265461: {"p": True}}))
+        await asyncio.sleep(0)
+        snapshots.clear()
+
+        await state_ref.ask(
+            ApplyGroupsCommand(
+                payload={"method": "gateway_get.group", "groups": [{"id": 265461, "nt": 4, "params": {"p": False}}]},
+                reason="node refresh",
+            )
+        )
+        await asyncio.sleep(0)
+
+        self.assertEqual(state.state.groups[265461]["params"]["p"], False)
+        self.assertEqual(state.state.nodes[265461].params["p"], False)
+        self.assertEqual(state.visible_node(265461).params["p"], True)
+        self.assertTrue(state.has_pending(265461, ["p"]))
+        self.assertEqual(snapshots, [])
+
+        await state.close()
+
     async def test_device_state_empty_refresh_response_marks_expired_props_stale(self) -> None:
         state = DeviceStateActor(ttl=0.01)
         state_ref = ActorRef(state)

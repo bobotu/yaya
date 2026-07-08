@@ -196,6 +196,17 @@ class PropertyIntentTracker:
             for pending in sorted(self._iter_pending(), key=lambda item: item.generation)
         ]
 
+    def signature(self) -> tuple[tuple[str, tuple[tuple[str, Any], ...]], ...]:
+        return tuple(
+            sorted(
+                (
+                    node_key,
+                    tuple(sorted((prop, pending.value) for prop, pending in pending_by_prop.items())),
+                )
+                for node_key, pending_by_prop in self._pending.items()
+            )
+        )
+
     def _iter_pending(self) -> Iterable[PendingPropertyIntent]:
         for pending_by_prop in self._pending.values():
             yield from pending_by_prop.values()
@@ -253,6 +264,9 @@ class MotorIntentTracker:
 
     def diagnostics(self, *, now: float) -> dict[str, Any]:
         return self.tracker.diagnostics(now=now)
+
+    def signature(self) -> tuple[tuple[str, tuple[tuple[str, str, int, bool], ...]], ...]:
+        return self.tracker.signature()
 
 
 @dataclass(frozen=True)
@@ -365,6 +379,9 @@ class CommandIntentRegistry:
             "properties": property_entries,
             "motor": self.motor.diagnostics(now=now),
         }
+
+    def signature(self) -> tuple[object, ...]:
+        return (self.properties.signature(), self.motor.signature())
 
 
 def _item_id(item: Mapping[str, Any]) -> str | int | None:
