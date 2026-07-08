@@ -17,12 +17,23 @@ from ..core.exceptions import ProtocolError
 from ..core.protocol import GatewayMethod
 from ..core.topology import TopologyNode
 from ..core.updates import PropertyChange
-from .actors import Actor, ActorClosed, ActorRef, create_actor_task
+from .actors import Actor, ActorClosed, ActorRef, ConnectionActor, DeviceStateActor, SessionActor, create_actor_task
 from .messages import (
+    CloseConnectionCommand,
+    ConfigureAutoSyncCommand,
+    ConnectSessionCommand,
+    DisableAutoSyncCommand,
     FullSyncSource,
     GatewayEventReceived,
+    GatewayRpcRequest,
+    RecordCommandIntentCommand,
+    RefreshNodeCommand,
+    RefreshNodeRequestedEvent,
     SessionEvent,
+    SetSessionStateCommand,
+    StartConnectionCommand,
     StateSnapshotChanged,
+    SyncSessionCommand,
 )
 from .model import (
     COMMAND_INTENT_TTL,
@@ -33,7 +44,6 @@ from .model import (
     GatewaySessionState,
     MotorTargetIntent,
 )
-from .runtime.gateway import YeelightProRuntime
 from .transport import GatewayRPC
 
 JSONDict = dict[str, Any]
@@ -58,16 +68,21 @@ class YeelightProGateway:
         set_prop_batch_delay: float = 0.01,
         rpc: GatewayRPC | None = None,
     ) -> None:
-        self._runtime = YeelightProRuntime(
+        self._rpc = rpc or GatewayRPC(
             host,
             port=port,
             request_timeout=request_timeout,
             reconnect_delay=reconnect_delay,
-            command_intent_ttl=command_intent_ttl,
-            rpc=rpc,
         )
-        self._state_actor = self._runtime.state
-        self._session = self._runtime.session
+        self._connection = ConnectionActor(self._rpc)
+        self._connection_ref = ActorRef(self._connection)
+        self._connection.bind_push_listener(self._connection_ref)
+        self._state_actor = DeviceStateActor(ttl=command_intent_ttl)
+        self._state_ref = ActorRef(self._state_actor)
+        self._session = SessionActor(connection_ref=self._connection_ref, device_state_ref=self._state_ref)
+        self._session_ref = ActorRef(self._session)
+        self._connection.set_session_sink(self._session_ref.tell)
+        self._state_actor.set_refresh_requester(self._handle_refresh_requested)
         self.state = self._state_actor.state
         self.command_intent_ttl = command_intent_ttl
         self._set_prop_batcher = _SetPropBatcher(self, delay=set_prop_batch_delay)
@@ -81,31 +96,31 @@ class YeelightProGateway:
 
     @property
     def is_connected(self) -> bool:
-        return self._runtime.is_connected
+        return self._connection.is_connected
 
     @property
     def last_disconnect_error(self) -> BaseException | None:
-        return self._runtime.last_disconnect_error
+        return self._connection.last_disconnect_error
 
     @property
     def session_state(self) -> GatewaySessionState:
-        return self._runtime.session_state
+        return self._session.session_state
 
     @property
     def last_full_sync_at(self) -> datetime | None:
-        return self._runtime.last_full_sync_at
+        return self._session.last_full_sync_at
 
     @property
     def last_full_sync_source(self) -> FullSyncSource | None:
-        return self._runtime.last_full_sync_source
+        return self._session.last_full_sync_source
 
     @property
     def full_prop_timeout(self) -> float:
-        return self._runtime.full_prop_timeout
+        return self._session.full_prop_timeout
 
     @full_prop_timeout.setter
     def full_prop_timeout(self, value: float) -> None:
-        self._runtime.full_prop_timeout = value
+        self._session.full_prop_timeout = value
 
     async def start(
         self,
@@ -114,27 +129,40 @@ class YeelightProGateway:
         include_rooms: bool = False,
         include_scenes: bool = False,
     ) -> None:
-        await self._runtime.start(
-            include_groups=include_groups,
-            include_rooms=include_rooms,
-            include_scenes=include_scenes,
+        await self._session_ref.ask(
+            ConfigureAutoSyncCommand(
+                include_groups=include_groups,
+                include_rooms=include_rooms,
+                include_scenes=include_scenes,
+            )
         )
+        await self._connection_ref.ask(StartConnectionCommand(connection_ref=self._connection_ref))
+        await self._session.wait_ready()
 
     async def stop(self) -> None:
         await self.close()
 
     async def connect(self) -> None:
-        await self._runtime.connect()
+        await self._session_ref.ask(DisableAutoSyncCommand())
+        await self._session_ref.ask(ConnectSessionCommand())
 
     async def reconnect(self) -> None:
-        await self._runtime.reconnect()
+        await self._session_ref.ask(ConnectSessionCommand())
 
     async def close(self) -> None:
         await self._set_prop_batcher.close()
-        await self._runtime.close()
+        await self._session_ref.ask(DisableAutoSyncCommand())
+        await self._session_ref.ask(SetSessionStateCommand(GatewaySessionState.CLOSING))
+        await self._connection_ref.ask(CloseConnectionCommand())
+        await self._connection.shutdown()
+        await self._session_ref.ask(
+            SetSessionStateCommand(GatewaySessionState.DISCONNECTED, self._connection.last_disconnect_error)
+        )
+        await self._session.close()
+        await self._state_actor.close()
 
     async def wait_closed(self) -> None:
-        await self._runtime.wait_closed()
+        await self._connection.wait_closed()
 
     async def sync(
         self,
@@ -143,11 +171,14 @@ class YeelightProGateway:
         include_rooms: bool = False,
         include_scenes: bool = False,
     ) -> None:
-        await self._runtime.sync(
-            include_groups=include_groups,
-            include_rooms=include_rooms,
-            include_scenes=include_scenes,
+        waiter = await self._session_ref.ask(
+            SyncSessionCommand(
+                include_groups=include_groups,
+                include_rooms=include_rooms,
+                include_scenes=include_scenes,
+            )
         )
+        await waiter
 
     async def request(
         self,
@@ -157,28 +188,30 @@ class YeelightProGateway:
         on_written: WriteCallback | None = None,
         timeout: float | None = None,
     ) -> JSONDict:
-        return await self._runtime.request(method, payload, on_written=on_written, timeout=timeout)
+        return await self._connection_ref.ask(
+            GatewayRpcRequest(method=method, payload=payload, on_written=on_written, timeout=timeout)
+        )
 
     async def get_topology(self) -> JSONDict:
-        return await self._runtime.get_topology()
+        return await self.request(GatewayMethod.GET_TOPOLOGY)
 
     async def get_node(self, node_id: str | int) -> JSONDict:
-        return await self._runtime.get_node(node_id)
+        return await self.request(GatewayMethod.GET_NODE, _id_payload(node_id))
 
     async def get_all_nodes(self) -> JSONDict:
-        return await self._runtime.get_all_nodes()
+        return await self.request(GatewayMethod.GET_NODE, _id_payload(0))
 
     async def refresh_node(self, node_id: str | int) -> JSONDict:
-        return await self._runtime.refresh_node(node_id)
+        return await self._session_ref.ask(RefreshNodeCommand(node_id=node_id))
 
     async def get_group(self, group_id: str | int | None = 0) -> JSONDict:
-        return await self._runtime.get_group(group_id)
+        return await self.request(GatewayMethod.GET_GROUP, _id_payload(group_id))
 
     async def get_room(self, room_id: str | int | None = 0) -> JSONDict:
-        return await self._runtime.get_room(room_id)
+        return await self.request(GatewayMethod.GET_ROOM, _id_payload(room_id))
 
     async def get_scene(self, scene_id: str | int | None = 0) -> JSONDict:
-        return await self._runtime.get_scene(scene_id)
+        return await self.request(GatewayMethod.GET_SCENE, _id_payload(scene_id))
 
     async def _send_node_commands(
         self,
@@ -207,13 +240,13 @@ class YeelightProGateway:
         _raise_for_missing_write_ack(GatewayMethod.SET_PROP, response)
         targets, stops = _motor_tracking_from_payload(payload)
         if intent_props_by_node:
-            await self._runtime.record_command_intents(
+            await self._record_command_intents(
                 intent_props_by_node,
                 motor_targets=tuple(targets),
                 motor_stops=tuple(stops),
             )
         elif targets or stops:
-            await self._runtime.record_command_intents(
+            await self._record_command_intents(
                 {},
                 motor_targets=tuple(targets),
                 motor_stops=tuple(stops),
@@ -328,6 +361,24 @@ class YeelightProGateway:
     @staticmethod
     def events_from_message(message: Mapping[str, Any]) -> list[GatewayEvent]:
         return list(iter_gateway_events(message))
+
+    async def _record_command_intents(
+        self,
+        props_by_node: Mapping[str | int, Mapping[str, Any]],
+        *,
+        motor_targets: tuple[MotorTargetIntent, ...] = (),
+        motor_stops: tuple[str | int, ...] = (),
+    ) -> None:
+        await self._state_ref.ask(
+            RecordCommandIntentCommand(
+                props_by_node=props_by_node,
+                motor_targets=motor_targets,
+                motor_stops=motor_stops,
+            )
+        )
+
+    async def _handle_refresh_requested(self, event: RefreshNodeRequestedEvent) -> None:
+        await self._session_ref.ask(RefreshNodeCommand(node_id=event.node_id))
 
 
 @dataclass(frozen=True)
@@ -495,6 +546,12 @@ async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
 def _validate_range(name: str, value: int, minimum: int, maximum: int) -> None:
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
+
+
+def _id_payload(item_id: str | int | None) -> Mapping[str, Any] | None:
+    if item_id is None:
+        return None
+    return {"params": {"id": item_id}}
 
 
 def _motor_tracking_from_payload(
