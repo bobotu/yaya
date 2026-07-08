@@ -180,17 +180,17 @@ class MotorStateTracker:
         self._tracking.clear()
         return affected
 
-    def expire(self, *, now: float) -> set[str | int]:
-        affected: set[str | int] = set()
+    def expire_pending(self, *, now: float) -> tuple[MotorAxisTrack, ...]:
+        expired: list[MotorAxisTrack] = []
         for node_key, tracks in list(self._tracking.items()):
             for target_prop, track in list(tracks.items()):
                 if track.expires_at > now:
                     continue
                 tracks.pop(target_prop, None)
-                affected.add(track.node_id)
+                expired.append(track)
             if not tracks:
                 self._tracking.pop(node_key, None)
-        return affected
+        return tuple(expired)
 
     def next_expiration(self, *, now: float) -> float | None:
         expirations = [

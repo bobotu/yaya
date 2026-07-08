@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from .intent import (
+    COMMAND_INTENT_TTL,
+    CommandIntentRegistry,
+    ExpiredIntent,
+    PendingPropertyIntent,
+    PropertyIntentTracker,
+)
 from .motor import (
     MOTOR_CURRENT_ANGLE_PROP,
     MOTOR_CURRENT_POSITION_PROP,
@@ -16,7 +23,6 @@ from .motor import (
     MotorStateTracker,
     MotorTargetIntent,
 )
-from .optimistic import OPTIMISTIC_STATE_TTL, OptimisticStateOverlay, PendingOverlay
 from .state import GatewayState, UnknownPropertyNode
 from .status import GatewaySessionState
 
@@ -35,10 +41,12 @@ __all__ = [
     "MOTOR_TRACKING_TARGET_ANGLE",
     "MOTOR_TRACKING_TARGET_POSITION",
     "MOTOR_TRACKING_TTL",
-    "OPTIMISTIC_STATE_TTL",
+    "COMMAND_INTENT_TTL",
+    "CommandIntentRegistry",
+    "ExpiredIntent",
     "MotorStateTracker",
     "MotorTargetIntent",
-    "OptimisticStateOverlay",
-    "PendingOverlay",
+    "PendingPropertyIntent",
+    "PropertyIntentTracker",
     "UnknownPropertyNode",
 ]

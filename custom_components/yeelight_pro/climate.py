@@ -99,7 +99,7 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
             self._attr_translation_placeholders = {"index": str(index)}
 
     @property
-    def optimistic_properties(self) -> tuple[str, ...]:
+    def intent_properties(self) -> tuple[str, ...]:
         return (self._key("acp"), self._key("acm"), self._key("actt"), self._key("acf"))
 
     @property
@@ -175,7 +175,7 @@ class YeelightProBathHeaterClimate(YeelightProEntity, ClimateEntity):
         self._attr_translation_key = "bath_heater_climate"
 
     @property
-    def optimistic_properties(self) -> tuple[str, ...]:
+    def intent_properties(self) -> tuple[str, ...]:
         return ("p", "tgt")
 
     @property

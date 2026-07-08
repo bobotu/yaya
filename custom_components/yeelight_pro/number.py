@@ -110,7 +110,7 @@ class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
         self.entity_description = description
 
     @property
-    def optimistic_properties(self) -> tuple[str, ...]:
+    def intent_properties(self) -> tuple[str, ...]:
         return (self.entity_description.key,)
 
     @property

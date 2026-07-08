@@ -73,7 +73,7 @@ class YeelightProRelaySwitch(YeelightProEntity, SwitchEntity):
         self._attr_translation_placeholders = {"channel": str(channel)}
 
     @property
-    def optimistic_properties(self) -> tuple[str, ...]:
+    def intent_properties(self) -> tuple[str, ...]:
         node = self.node
         return () if node is None else (relay_prop_name(node, self._channel),)
 
@@ -129,7 +129,7 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
         self._attr_translation_key = translation_key
 
     @property
-    def optimistic_properties(self) -> tuple[str, ...]:
+    def intent_properties(self) -> tuple[str, ...]:
         return (self._prop,)
 
     @property

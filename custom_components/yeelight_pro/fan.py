@@ -57,7 +57,7 @@ class YeelightProBathHeaterFan(YeelightProEntity, FanEntity):
         self._attr_translation_key = translation_key
 
     @property
-    def optimistic_properties(self) -> tuple[str, ...]:
+    def intent_properties(self) -> tuple[str, ...]:
         return (self._prop,)
 
     @property

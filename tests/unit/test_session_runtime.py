@@ -20,11 +20,9 @@ from yeelight_pro.session.actors import (  # noqa: E402
     create_actor_task,
 )
 from yeelight_pro.session.messages import (  # noqa: E402
-    ApplyMotorStopCommand,
-    ApplyMotorTargetsCommand,
-    ApplyOptimisticPropsCommand,
     ApplyPropertiesCommand,
     ApplyTopologyCommand,
+    RecordCommandIntentCommand,
     SessionStatusChanged,
     StateSnapshotChanged,
     SyncStartedEvent,
@@ -218,7 +216,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received, ["topology sync"])
         await state.close()
 
-    async def test_device_state_clears_overlay_on_sync_and_disconnect_events(self) -> None:
+    async def test_device_state_clears_intents_on_sync_and_disconnect_events(self) -> None:
         state = DeviceStateActor()
         state_ref = ActorRef(state)
         snapshots: list[StateSnapshotChanged] = []
@@ -231,15 +229,15 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 message={"method": "gateway_sync.topology"},
             )
         )
-        await state_ref.ask(ApplyOptimisticPropsCommand({"light-1": {"p": True}}))
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
         self.assertTrue(state.has_pending("light-1", ["p"]))
 
         await state_ref.tell(SyncStartedEvent(reason="manual sync"))
         await asyncio.sleep(0.01)
         self.assertFalse(state.has_pending("light-1", ["p"]))
-        self.assertIn("gateway_overlay.clear", [snapshot.message["method"] for snapshot in snapshots])
+        self.assertIn("gateway_intent.clear", [snapshot.message["method"] for snapshot in snapshots])
 
-        await state_ref.ask(ApplyOptimisticPropsCommand({"light-1": {"p": True}}))
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
         await state_ref.tell(
             SessionStatusChanged(
                 previous=GatewaySessionState.READY,
@@ -251,8 +249,8 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.has_pending("light-1", ["p"]))
         await state.close()
 
-    async def test_device_state_reconciles_authoritative_push_and_requests_refresh_on_expiry(self) -> None:
-        state = DeviceStateActor()
+    async def test_device_state_keeps_intent_on_mismatched_push_and_requests_refresh_on_expiry(self) -> None:
+        state = DeviceStateActor(ttl=0.01)
         state_ref = ActorRef(state)
         refreshes: list[str | int] = []
         state.set_refresh_requester(lambda event: refreshes.append(event.node_id))
@@ -264,8 +262,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 message={"method": "gateway_sync.topology"},
             )
         )
-        state.overlay.ttl = 0.01
-        await state_ref.ask(ApplyOptimisticPropsCommand({"light-1": {"p": True}}))
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
         self.assertEqual(state.visible_node("light-1").params["p"], True)
 
         await state_ref.ask(
@@ -274,13 +271,98 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 reason="property push",
             )
         )
-        self.assertFalse(state.has_pending("light-1", ["p"]))
-        self.assertEqual(state.visible_node("light-1").params["p"], False)
+        self.assertTrue(state.has_pending("light-1", ["p"]))
+        self.assertEqual(state.visible_node("light-1").params["p"], True)
 
-        await state_ref.ask(ApplyOptimisticPropsCommand({"light-1": {"p": True}}))
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
         await asyncio.sleep(0.05)
         self.assertEqual(refreshes, ["light-1"])
         self.assertFalse(state.has_pending("light-1", ["p"]))
+        self.assertIs(state.visible_node("light-1").online, False)
+        await state.close()
+
+    async def test_device_state_expiry_marks_node_unavailable_until_fresh_state_arrives(self) -> None:
+        state = DeviceStateActor(ttl=0.01)
+        state_ref = ActorRef(state)
+        snapshots: list[StateSnapshotChanged] = []
+        refreshes: list[str | int] = []
+        state.add_state_listener(snapshots.append)
+        state.set_refresh_requester(lambda event: refreshes.append(event.node_id))
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload=_topology(True),
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": False}}))
+        self.assertEqual(state.visible_node("light-1").params["p"], False)
+
+        snapshots.clear()
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(refreshes, ["light-1"])
+        self.assertFalse(state.has_pending("light-1", ["p"]))
+        self.assertIs(state.visible_node("light-1").online, False)
+        self.assertIn("gateway_intent.expired", [snapshot.message["method"] for snapshot in snapshots])
+
+        await state_ref.ask(
+            ApplyPropertiesCommand(
+                payload={"method": "gateway_get.node", "nodes": [{"id": "light-1", "params": {"p": True}}]},
+                reason="node refresh",
+            )
+        )
+        self.assertIsNot(state.visible_node("light-1").online, False)
+        self.assertEqual(state.visible_node("light-1").params["p"], True)
+        await state.close()
+
+    async def test_device_state_masks_transition_intermediate_values_until_targets_confirm(self) -> None:
+        state = DeviceStateActor()
+        state_ref = ActorRef(state)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload={
+                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False, "l": 10, "ct": 2700}}],
+                    "groups": [],
+                    "rooms": [],
+                    "scenes": [],
+                },
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True, "l": 80, "ct": 4000}}))
+
+        await state_ref.ask(
+            ApplyPropertiesCommand(
+                payload={
+                    "method": "gateway_post.prop",
+                    "nodes": [{"id": "light-1", "params": {"p": True, "l": 20, "ct": 3000}}],
+                },
+                reason="property push",
+            )
+        )
+        visible = state.visible_node("light-1")
+        self.assertEqual(visible.params["p"], True)
+        self.assertEqual(visible.params["l"], 80)
+        self.assertEqual(visible.params["ct"], 4000)
+        self.assertFalse(state.has_pending("light-1", ["p"]))
+        self.assertTrue(state.has_pending("light-1", ["l", "ct"]))
+
+        await state_ref.ask(
+            ApplyPropertiesCommand(
+                payload={
+                    "method": "gateway_post.prop",
+                    "nodes": [{"id": "light-1", "params": {"l": 80, "ct": 4000}}],
+                },
+                reason="property push",
+            )
+        )
+        self.assertFalse(state.has_pending("light-1", ["p", "l", "ct"]))
+        self.assertEqual(state.visible_node("light-1").params["l"], 80)
+        self.assertEqual(state.visible_node("light-1").params["ct"], 4000)
         await state.close()
 
     async def test_device_state_tracks_motor_target_push_stop_disconnect_and_expiry(self) -> None:
@@ -301,7 +383,9 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 message={"method": "gateway_sync.topology"},
             )
         )
-        await state_ref.ask(ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 80),)))
+        await state_ref.ask(
+            RecordCommandIntentCommand({}, motor_targets=(MotorTargetIntent("curtain-1", "cp", "tp", 80),))
+        )
         visible = state.visible_node("curtain-1")
         self.assertEqual(visible.params["cp"], 20)
         self.assertEqual(visible.params[MOTOR_TRACKING_TARGET_POSITION], 80)
@@ -325,11 +409,15 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
 
-        await state_ref.ask(ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),)))
-        await state_ref.ask(ApplyMotorStopCommand(("curtain-1",)))
+        await state_ref.ask(
+            RecordCommandIntentCommand({}, motor_targets=(MotorTargetIntent("curtain-1", "cp", "tp", 10),))
+        )
+        await state_ref.ask(RecordCommandIntentCommand({}, motor_stops=("curtain-1",)))
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
 
-        await state_ref.ask(ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),)))
+        await state_ref.ask(
+            RecordCommandIntentCommand({}, motor_targets=(MotorTargetIntent("curtain-1", "cp", "tp", 10),))
+        )
         await state_ref.tell(
             SessionStatusChanged(
                 previous=GatewaySessionState.READY,
@@ -340,7 +428,9 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
 
-        await state_ref.ask(ApplyMotorTargetsCommand((MotorTargetIntent("curtain-1", "cp", "tp", 10),)))
+        await state_ref.ask(
+            RecordCommandIntentCommand({}, motor_targets=(MotorTargetIntent("curtain-1", "cp", "tp", 10),))
+        )
         await asyncio.sleep(0.05)
         self.assertEqual(refreshes, ["curtain-1"])
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)

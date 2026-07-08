@@ -19,10 +19,11 @@ from yeelight_pro.core import (  # noqa: E402
 from yeelight_pro.session.model import (  # noqa: E402
     MOTOR_TRACKING_POSITION_MOTION,
     MOTOR_TRACKING_TARGET_POSITION,
+    CommandIntentRegistry,
     GatewayState,
     MotorStateTracker,
     MotorTargetIntent,
-    OptimisticStateOverlay,
+    PropertyIntentTracker,
 )
 
 
@@ -290,7 +291,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertIsNone(state.room_name("bad"))
         self.assertIsNone(state.room_name(None))
 
-    def test_optimistic_overlay_projects_reconciles_and_expires(self) -> None:
+    def test_command_intent_registry_projects_reconciles_and_expires(self) -> None:
         state = GatewayState()
         state.apply_topology(
             {
@@ -300,55 +301,132 @@ class ProtocolAndStateTests(unittest.TestCase):
                 "scenes": [],
             }
         )
-        overlay = OptimisticStateOverlay(ttl=5.0)
+        registry = CommandIntentRegistry(ttl=5.0)
 
-        overlay.set_props("light-1", {"p": True}, now=10.0)
-        visible = overlay.visible_node(state.nodes["light-1"], now=11.0)
+        registry.record_property_intents({"light-1": {"p": True}}, nodes=state.nodes, now=10.0)
+        visible = registry.project_visible(state.nodes["light-1"])
         self.assertEqual(visible.params["p"], True)
         self.assertEqual(state.nodes["light-1"].params["p"], False)
-        self.assertTrue(overlay.has_pending("light-1", ["p"]))
+        self.assertTrue(registry.has_pending("light-1", ["p"]))
 
-        overlay.set_props("light-1", {"p": False}, now=12.0)
-        visible = overlay.visible_node(state.nodes["light-1"], now=12.1)
-        self.assertEqual(visible.params["p"], False)
-
-        affected = overlay.reconcile_node_props("light-1", {"p": False})
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"p": True}}]},
+            nodes=state.nodes,
+            now=13.0,
+        )
         self.assertEqual(affected, {"light-1"})
-        self.assertFalse(overlay.has_pending("light-1", ["p"]))
+        self.assertFalse(registry.has_pending("light-1", ["p"]))
 
-        overlay.set_props("light-1", {"l": 20}, now=20.0)
-        self.assertEqual(overlay.expire(now=24.9), set())
-        self.assertEqual(overlay.expire(now=25.0), {"light-1"})
-        self.assertFalse(overlay.has_pending("light-1"))
+        registry.record_property_intents({"light-1": {"l": 20}}, nodes=state.nodes, now=20.0)
+        self.assertEqual(registry.expire_pending(now=24.9), ())
+        expired = registry.expire_pending(now=25.0)
+        self.assertEqual(tuple(item.node_id for item in expired), ("light-1",))
+        self.assertEqual(expired[0].props, ("l",))
+        self.assertFalse(registry.has_pending("light-1"))
 
-    def test_optimistic_overlay_clears_by_node_and_missing_topology(self) -> None:
-        overlay = OptimisticStateOverlay(ttl=5.0)
+    def test_command_intent_keeps_target_projection_when_authoritative_value_is_stale(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True, "l": 80}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=5.0)
 
-        self.assertEqual(overlay.set_props("light-1", {"p": True, "l": 42}, now=1.0), {"light-1"})
-        self.assertEqual(overlay.set_props("switch-1", {"1-sp": False}, now=1.0), {"switch-1"})
-        self.assertTrue(overlay.has_pending("light-1"))
-        self.assertTrue(overlay.has_pending("switch-1"))
+        registry.record_property_intents({"light-1": {"p": False}}, nodes=state.nodes, now=10.0)
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"p": True, "l": 40}}]},
+            nodes=state.nodes,
+            now=12.0,
+        )
 
-        self.assertEqual(overlay.clear_props("light-1", ["p"]), {"light-1"})
-        self.assertFalse(overlay.has_pending("light-1", ["p"]))
-        self.assertTrue(overlay.has_pending("light-1", ["l"]))
+        self.assertEqual(affected, set())
+        self.assertFalse(registry.project_visible(state.nodes["light-1"]).params["p"])
+        self.assertTrue(registry.has_pending("light-1", ["p"]))
 
-        self.assertEqual(overlay.clear_missing_nodes(["switch-1"]), {"light-1"})
-        self.assertFalse(overlay.has_pending("light-1"))
-        self.assertTrue(overlay.has_pending("switch-1"))
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"p": False}}]},
+            nodes=state.nodes,
+            now=13.0,
+        )
 
-        self.assertEqual(overlay.clear_all(), {"switch-1"})
-        self.assertFalse(overlay.has_pending("switch-1"))
+        self.assertEqual(affected, {"light-1"})
+        self.assertFalse(registry.has_pending("light-1", ["p"]))
 
-    def test_optimistic_overlay_ignores_invalid_node_and_property_keys(self) -> None:
-        overlay = OptimisticStateOverlay(ttl=5.0)
+    def test_property_intent_conflicting_push_does_not_clear_projection(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "switch-1", "nt": 2, "type": 13, "params": {"2-sp": True}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=5.0)
 
-        self.assertEqual(overlay.set_props(True, {"p": True}, now=1.0), set())
-        self.assertEqual(overlay.set_props("light-1", {"p": True, 1: "bad"}, now=1.0), {"light-1"})
-        self.assertTrue(overlay.has_pending("light-1", ["p"]))
-        self.assertFalse(overlay.has_pending("light-1", ["1"]))
-        self.assertEqual(overlay.reconcile_node_props(True, {"p": True}), set())
-        self.assertEqual(overlay.clear_node("light-1"), {"light-1"})
+        registry.record_property_intents({"switch-1": {"2-sp": False}}, nodes=state.nodes, now=10.0)
+        self.assertFalse(registry.project_visible(state.nodes["switch-1"]).params["2-sp"])
+
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "switch-1", "params": {"2-sp": True}}]},
+            nodes=state.nodes,
+            now=12.0,
+        )
+
+        self.assertEqual(affected, set())
+        self.assertTrue(registry.has_pending("switch-1", ["2-sp"]))
+        self.assertFalse(registry.project_visible(state.nodes["switch-1"]).params["2-sp"])
+
+    def test_command_intent_registry_clears_by_node_and_missing_topology(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [
+                    {"id": "light-1", "nt": 2, "type": 3, "params": {"p": False, "l": 80}},
+                    {"id": "switch-1", "nt": 2, "type": 13, "params": {"1-sp": True}},
+                ],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=5.0)
+
+        self.assertEqual(
+            registry.record_property_intents(
+                {"light-1": {"p": True, "l": 42}, "switch-1": {"1-sp": False}},
+                nodes=state.nodes,
+                now=1.0,
+            ),
+            {"light-1", "switch-1"},
+        )
+        self.assertTrue(registry.has_pending("light-1"))
+        self.assertTrue(registry.has_pending("switch-1"))
+
+        self.assertEqual(registry.properties.clear_props("light-1", ["p"]), {"light-1"})
+        self.assertFalse(registry.has_pending("light-1", ["p"]))
+        self.assertTrue(registry.has_pending("light-1", ["l"]))
+
+        self.assertEqual(registry.clear_missing_nodes(["switch-1"]), {"light-1"})
+        self.assertFalse(registry.has_pending("light-1"))
+        self.assertTrue(registry.has_pending("switch-1"))
+
+        self.assertEqual(registry.clear_all(), {"switch-1"})
+        self.assertFalse(registry.has_pending("switch-1"))
+
+    def test_property_intent_tracker_ignores_invalid_node_and_property_keys(self) -> None:
+        tracker = PropertyIntentTracker(ttl=5.0)
+
+        self.assertEqual(tracker.record(True, {"p": True}, now=1.0), set())
+        self.assertEqual(tracker.record("light-1", {"p": True, 1: "bad"}, now=1.0), {"light-1"})
+        self.assertTrue(tracker.has_pending("light-1", ["p"]))
+        self.assertFalse(tracker.has_pending("light-1", ["1"]))
+        self.assertEqual(tracker.apply_authoritative_node(True, {"p": True}, now=2.0), set())
+        self.assertEqual(tracker.clear_node("light-1"), {"light-1"})
 
     def test_motor_tracking_uses_target_without_overwriting_current_position(self) -> None:
         state = GatewayState()
@@ -427,8 +505,9 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertFalse(tracker.has_tracking("curtain-1"))
 
         tracker.set_target(MotorTargetIntent("curtain-1", "cp", "tp", 90), current_value=10, now=10.0)
-        self.assertEqual(tracker.expire(now=14.9), set())
-        self.assertEqual(tracker.expire(now=15.0), {"curtain-1"})
+        self.assertEqual(tracker.expire_pending(now=14.9), ())
+        expired = tracker.expire_pending(now=15.0)
+        self.assertEqual(tuple(track.node_id for track in expired), ("curtain-1",))
         self.assertFalse(tracker.has_tracking("curtain-1"))
 
     def test_gateway_event_normalization_for_programmable_switches(self) -> None:

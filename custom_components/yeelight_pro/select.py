@@ -53,7 +53,7 @@ class YeelightProBathModeSelect(YeelightProEntity, SelectEntity):
         super().__init__(coordinator, node, "bath_mode")
 
     @property
-    def optimistic_properties(self) -> tuple[str, ...]:
+    def intent_properties(self) -> tuple[str, ...]:
         return ("bhm",)
 
     @property
