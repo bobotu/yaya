@@ -93,10 +93,7 @@ def _number_entities_for_node(coordinator: YeelightProCoordinator, node: Any) ->
 def _stale_number_unique_ids_for_node(coordinator: YeelightProCoordinator, node: Any) -> tuple[str, ...]:
     if device_type(node) not in {DeviceType.AIR_CONDITION, DeviceType.AIR_CONDITION_VRF}:
         return ()
-    return tuple(
-        node_unique_id(coordinator.gateway_id, node.id, key)
-        for key in _indexed_props(node, "acd")
-    )
+    return tuple(node_unique_id(coordinator.gateway_id, node.id, key) for key in _indexed_props(node, "acd"))
 
 
 class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):

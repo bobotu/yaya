@@ -59,8 +59,7 @@ def _stale_switch_unique_ids_for_node(coordinator: YeelightProCoordinator, node:
     if not (is_multi_switch_node(node) or is_double_switch_node(node)):
         return ()
     return tuple(
-        node_unique_id(coordinator.gateway_id, node.id, f"relay_{channel}")
-        for channel in relay_channel_numbers(node)
+        node_unique_id(coordinator.gateway_id, node.id, f"relay_{channel}") for channel in relay_channel_numbers(node)
     )
 
 
