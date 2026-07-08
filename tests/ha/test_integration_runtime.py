@@ -77,7 +77,7 @@ class FakeGateway:
         self.refreshed_node_ids: list[str | int] = []
         self.sync_kwargs: list[dict[str, Any]] = []
         self._intents = CommandIntentRegistry()
-        self._stale_node_ids: set[str] = set()
+        self._stale_node_props: dict[str, tuple[str | int, dict[str, int | None]]] = {}
         self._event_listeners = []
         self._property_listeners = []
         self._session_listeners = []
@@ -115,7 +115,7 @@ class FakeGateway:
     async def sync(self, **kwargs: Any) -> None:
         self.sync_kwargs.append(kwargs)
         self._intents.clear_all()
-        self._stale_node_ids.clear()
+        self._stale_node_props.clear()
         self.state.apply_topology(self.fixture)
         self.last_full_sync_source = "poll"
         previous = self.session_state
@@ -215,7 +215,6 @@ class FakeGateway:
             listener(event)
 
     def update_node_params(self, node_id: str | int, params: dict[str, Any]) -> None:
-        self._stale_node_ids.discard(str(node_id))
         self.state.apply_properties(
             {
                 "method": "gateway_post.prop",
@@ -235,18 +234,51 @@ class FakeGateway:
         )
         self._notify_state({"method": "gateway_post.prop"})
 
+    def refresh_node_params(self, node_id: str | int, params: dict[str, Any]) -> None:
+        node_key = str(node_id)
+        stale = self._stale_node_props.pop(node_key, None)
+        settled_generations = None
+        if stale is not None:
+            _stale_node_id, stale_props = stale
+            settled_generations = {
+                node_key: {
+                    prop: generation
+                    for prop, generation in stale_props.items()
+                    if prop in params and generation is not None
+                }
+            }
+        self.state.apply_properties(
+            {
+                "method": "gateway_get.node",
+                "nodes": [
+                    {
+                        "id": node_id,
+                        "nt": 2,
+                        "params": params,
+                    }
+                ],
+            }
+        )
+        self._intents.apply_authoritative_message(
+            {"nodes": [{"id": node_id, "params": params}]},
+            nodes=self.state.nodes,
+            now=asyncio.get_running_loop().time(),
+            settled_generations=settled_generations,
+        )
+        self._notify_state({"method": "gateway_get.node"})
+
     def expire_command_intents(self) -> None:
         expired = self._intents.expire_pending(now=asyncio.get_running_loop().time() + 3600)
         if not expired:
             return
         for item in expired:
-            self._stale_node_ids.add(str(item.node_id))
+            self._stale_node_props[str(item.node_id)] = (item.node_id, item.generation_by_prop())
             self.refreshed_node_ids.append(item.node_id)
         self._notify_state({"method": "gateway_intent.expired"})
 
     def _project_visible(self, node: Any) -> Any:
         visible = self._intents.project_visible(node)
-        if str(node.id) in self._stale_node_ids:
+        if str(node.id) in self._stale_node_props:
             return replace(visible, online=False)
         return visible
 
@@ -277,7 +309,9 @@ class FakeGateway:
         self.state.apply_topology(fixture)
         self._intents.clear_missing_nodes(self.state.topology_node_ids)
         active_node_ids = {str(node_id) for node_id in self.state.topology_node_ids}
-        self._stale_node_ids.intersection_update(active_node_ids)
+        for node_id in list(self._stale_node_props):
+            if node_id not in active_node_ids:
+                self._stale_node_props.pop(node_id, None)
         for listener in list(self._state_listeners):
             listener(
                 StateSnapshotChanged(
@@ -378,12 +412,13 @@ async def test_relay_switch_conflicting_gateway_push_resolves_after_intent_expir
         await hass.async_block_till_done()
 
         assert gateway.refreshed_node_ids == ["switch-1"]
-        assert not gateway.has_pending_intent("switch-1", ["2-sp"])
+        assert gateway.has_pending_intent("switch-1", ["2-sp"])
         assert hass.states.get(switch_entity_id).state == STATE_UNAVAILABLE
 
-        gateway.update_node_params("switch-1", {"2-sp": True})
+        gateway.refresh_node_params("switch-1", {"2-sp": True})
         await hass.async_block_till_done()
 
+        assert not gateway.has_pending_intent("switch-1", ["2-sp"])
         assert hass.states.get(switch_entity_id).state == STATE_ON
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
@@ -1215,12 +1250,13 @@ async def test_light_intent_expiry_marks_entity_unavailable_until_refresh_arrive
         await hass.async_block_till_done()
 
         assert gateway.refreshed_node_ids == ["light-1"]
-        assert not gateway.has_pending_intent("light-1", ["p"])
+        assert gateway.has_pending_intent("light-1", ["p"])
         assert hass.states.get(light_entity_id).state == STATE_UNAVAILABLE
 
-        gateway.update_node_params("light-1", {"p": True})
+        gateway.refresh_node_params("light-1", {"p": True})
         await hass.async_block_till_done()
 
+        assert not gateway.has_pending_intent("light-1", ["p"])
         assert hass.states.get(light_entity_id).state == STATE_ON
     finally:
         await hass.config_entries.async_unload(entry.entry_id)

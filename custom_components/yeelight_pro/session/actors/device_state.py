@@ -67,8 +67,8 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         if motor_tracking_ttl is not None:
             intent_kwargs["motor_tracking_ttl"] = motor_tracking_ttl
         self.intents = CommandIntentRegistry(**intent_kwargs)
-        self._stale_node_props: dict[str, tuple[str | int, set[str]]] = {}
-        self._refreshing_expired_props: dict[str, tuple[str | int, dict[str, int]]] = {}
+        self._stale_node_props: dict[str, tuple[str | int, dict[str, int | None]]] = {}
+        self._refreshing_expired_props: dict[str, tuple[str | int, dict[str, int | None]]] = {}
         self._visible_nodes: dict[str | int, TopologyNode] = {}
         self._watchdog: asyncio.Task[None] | None = None
         self._state_listeners: list[StateListener] = []
@@ -226,11 +226,17 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         before_visible: VisibleProjectionSignature,
     ) -> None:
         now = asyncio.get_running_loop().time()
+        settled_generations = (
+            self._settled_generations_from_message(event.message)
+            if event.reason == StateChangeReason.NODE_REFRESH
+            else None
+        )
         affected = self.intents.apply_authoritative_message(
             event.message,
             nodes=self.state.nodes,
             now=now,
             request_generations=event.request_generations,
+            settled_generations=settled_generations,
         )
         stale_affected = self._clear_stale_from_message(event.message)
         refreshing_affected = self._clear_refreshing_from_message(event.message, event.request_generations)
@@ -412,7 +418,8 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
                 current = (item.node_id, {})
                 self._refreshing_expired_props[node_key] = current
             generations = item.generation_by_prop()
-            current[1].update({prop: generations.get(prop, 0) for prop in item.props})
+            for prop in item.props:
+                current[1][prop] = generations.get(prop)
             affected.add(item.node_id)
         return affected
 
@@ -428,24 +435,45 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             _refreshing_node_id, refreshing_props = refreshing
             item_generations = item.generation_by_prop()
             failed_props: set[str] = set()
+            failed_generations: dict[str, int | None] = {}
             for prop in item.props:
-                generation = item_generations.get(prop, 0)
+                generation = item_generations.get(prop)
                 if refreshing_props.get(prop) != generation:
                     continue
                 refreshing_props.pop(prop, None)
-                if generation == 0 or self.intents.is_latest_requested(item.node_id, prop, generation):
+                if generation is None or self.intents.is_latest_requested(item.node_id, prop, generation):
                     failed_props.add(prop)
+                    failed_generations[prop] = generation
             if not refreshing_props:
                 self._refreshing_expired_props.pop(node_key, None)
             if not failed_props:
                 continue
             stale = self._stale_node_props.get(node_key)
             if stale is None:
-                stale = (item.node_id, set())
+                stale = (item.node_id, {})
                 self._stale_node_props[node_key] = stale
-            stale[1].update(failed_props)
+            for prop in failed_props:
+                stale[1][prop] = failed_generations.get(prop)
             affected.add(item.node_id)
         return affected
+
+    def _settled_generations_from_message(self, message: Mapping[str, Any]) -> dict[str, dict[str, int]]:
+        settled: dict[str, dict[str, int]] = {}
+        for item in _authoritative_property_items(message):
+            node_id = _payload_node_id(item)
+            params = item.get("params")
+            node_key = _node_key(node_id)
+            if node_key is None or not isinstance(params, Mapping):
+                continue
+            _tracking_node_id, tracking_props = self._refreshing_expired_props.get(
+                node_key,
+                self._stale_node_props.get(node_key, (node_id, {})),
+            )
+            for prop in params:
+                generation = tracking_props.get(prop)
+                if isinstance(prop, str) and generation is not None:
+                    settled.setdefault(node_key, {})[prop] = generation
+        return settled
 
     def _clear_stale_from_message(self, message: Mapping[str, Any]) -> set[str | int]:
         affected: set[str | int] = set()
@@ -490,7 +518,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         before = len(stale_props)
         for prop in props:
             if isinstance(prop, str):
-                stale_props.discard(prop)
+                stale_props.pop(prop, None)
         if stale_props:
             affected = {stale_node_id} if len(stale_props) != before else set()
             if affected:
@@ -576,8 +604,6 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         self._visible_nodes = {}
         for node_id, node in self.state.nodes.items():
             visible = self.intents.project_visible(node)
-            if _node_key(node_id) in self._stale_node_props:
-                visible = replace(visible, online=False)
             self._visible_nodes[node_id] = visible
         _LOGGER.debug(
             "Yeelight Pro visible cache rebuilt: nodes=%s stale=%s",
@@ -669,7 +695,9 @@ def _node_signature(node: TopologyNode) -> tuple[object, ...]:
     )
 
 
-def _stale_signature(stale: Mapping[str, tuple[str | int, set[str]]]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+def _stale_signature(
+    stale: Mapping[str, tuple[str | int, Mapping[str, int | None]]],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
     return tuple(sorted((node_key, tuple(sorted(props))) for node_key, (_node_id, props) in stale.items()))
 
 

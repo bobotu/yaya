@@ -322,6 +322,17 @@ class ProtocolAndStateTests(unittest.TestCase):
         expired = registry.expire_pending(now=25.0)
         self.assertEqual(tuple(item.node_id for item in expired), ("light-1",))
         self.assertEqual(expired[0].props, ("l",))
+        self.assertEqual(tuple((item.prop, item.generation) for item in expired[0].generations), (("l", 1),))
+        self.assertTrue(registry.has_pending("light-1"))
+        self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["l"], 20)
+
+        affected = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"l": 80}}]},
+            nodes=state.nodes,
+            now=25.1,
+            settled_generations={"light-1": {"l": 1}},
+        )
+        self.assertEqual(affected, {"light-1"})
         self.assertFalse(registry.has_pending("light-1"))
 
     def test_command_intent_keeps_target_projection_when_authoritative_value_is_stale(self) -> None:
