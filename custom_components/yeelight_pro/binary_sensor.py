@@ -12,7 +12,7 @@ from .coordinator import YeelightProCoordinator
 from .core import is_knob_capable
 from .core.topology import DeviceType
 from .entity import YeelightProEntity
-from .helpers import device_type, relay_channel_numbers, relay_prop_name
+from .helpers import device_type, node_unique_id, relay_channel_numbers, relay_prop_name
 from .platform import async_add_dynamic_entities
 
 PARALLEL_UPDATES = 0
@@ -30,6 +30,7 @@ async def async_setup_entry(
         async_add_entities,
         lambda node: _binary_sensors_for_node(coordinator, node),
         "binary_sensor",
+        lambda node: _stale_binary_sensor_unique_ids_for_node(coordinator, node),
     )
 
 
@@ -54,6 +55,13 @@ def _binary_sensors_for_node(coordinator: YeelightProCoordinator, node: Any) -> 
             YeelightProRelayStateBinarySensor(coordinator, node, channel) for channel in relay_channel_numbers(node)
         )
     return entities
+
+
+def _stale_binary_sensor_unique_ids_for_node(coordinator: YeelightProCoordinator, node: Any) -> tuple[str, ...]:
+    return tuple(
+        node_unique_id(coordinator.gateway_id, node.id, f"relay_{channel}_state")
+        for channel in relay_channel_numbers(node)
+    )
 
 
 class YeelightProMotionBinarySensor(YeelightProEntity, BinarySensorEntity):

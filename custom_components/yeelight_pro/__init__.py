@@ -13,7 +13,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .const import PLATFORMS
     from .coordinator import YeelightProCoordinator
     from .core import YeelightProError
-    from .platform import async_remove_obsolete_entities
 
     coordinator = YeelightProCoordinator(hass, entry)
     try:
@@ -27,7 +26,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.runtime_data = coordinator
     try:
-        async_remove_obsolete_entities(entry, coordinator)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     except Exception:

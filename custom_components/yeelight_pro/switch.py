@@ -15,6 +15,7 @@ from .helpers import (
     device_type,
     is_double_switch_node,
     is_multi_switch_node,
+    node_unique_id,
     relay_channel_numbers,
     relay_prop_name,
 )
@@ -35,6 +36,7 @@ async def async_setup_entry(
         async_add_entities,
         lambda node: _switch_entities_for_node(coordinator, node),
         "switch",
+        lambda node: _stale_switch_unique_ids_for_node(coordinator, node),
     )
 
 
@@ -51,6 +53,15 @@ def _switch_entities_for_node(coordinator: YeelightProCoordinator, node: Any) ->
         for key in _indexed_props(node, "acrc"):
             entities.append(YeelightProPropertySwitch(coordinator, node, key, "remote_controller"))
     return entities
+
+
+def _stale_switch_unique_ids_for_node(coordinator: YeelightProCoordinator, node: Any) -> tuple[str, ...]:
+    if not (is_multi_switch_node(node) or is_double_switch_node(node)):
+        return ()
+    return tuple(
+        node_unique_id(coordinator.gateway_id, node.id, f"relay_{channel}")
+        for channel in relay_channel_numbers(node)
+    )
 
 
 class YeelightProRelaySwitch(YeelightProEntity, SwitchEntity):
