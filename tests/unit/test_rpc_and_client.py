@@ -19,6 +19,7 @@ from yeelight_pro.core import (  # noqa: E402
     NodeCommand,
     NodeSet,
     ProtocolError,
+    ProtocolFrameTooLarge,
     RequestTimeout,
     parse_line,
 )
@@ -1327,6 +1328,65 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(batcher.submit(command, {"light-1": {"p": True}}), timeout=0.2)
         await asyncio.wait_for(close_task, timeout=0.2)
         self.assertEqual(batcher._pending, [])
+
+    async def test_invalid_json_response_closes_connection_and_fails_pending_request(self) -> None:
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await reader.readuntil(b"\r\n")
+                writer.write(b"not-json\r\n")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        rpc = GatewayRPC(host, port=port)
+
+        try:
+            await rpc.connect()
+            with self.assertRaises(ProtocolError) as ctx:
+                await rpc.request("gateway_get.node", {"params": {"id": 0}})
+            await asyncio.wait_for(rpc.wait_closed(), timeout=0.5)
+        finally:
+            await rpc.close()
+
+        self.assertFalse(rpc.is_connected)
+        self.assertIsInstance(rpc.last_disconnect_error, ProtocolError)
+        self.assertIn("valid JSON", str(ctx.exception))
+
+    async def test_oversized_response_frame_closes_connection_and_fails_pending_request(self) -> None:
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                request = parse_line(await reader.readuntil(b"\r\n"))
+                writer.write(
+                    json.dumps(
+                        {"id": request["id"], "blob": "x" * 256},
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\r\n"
+                )
+                await writer.drain()
+                await asyncio.sleep(0.05)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        rpc = GatewayRPC(host, port=port)
+        rpc.max_frame_bytes = 64
+
+        try:
+            await rpc.connect()
+            with self.assertRaises(ProtocolFrameTooLarge) as ctx:
+                await rpc.request("gateway_get.node", {"params": {"id": 0}})
+            await asyncio.wait_for(rpc.wait_closed(), timeout=0.5)
+        finally:
+            await rpc.close()
+
+        self.assertFalse(rpc.is_connected)
+        self.assertIsInstance(rpc.last_disconnect_error, ProtocolFrameTooLarge)
+        self.assertIn("exceeded 64 bytes", str(ctx.exception))
 
     async def test_rpc_push_listener_exception_does_not_stop_dispatch(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
