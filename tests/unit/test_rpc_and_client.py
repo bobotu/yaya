@@ -461,7 +461,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port)
 
         try:
-            await gateway._runtime.state_ref.ask(
+            await gateway._state_ref.ask(
                 ApplyTopologyCommand(
                     payload={
                         "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
@@ -507,7 +507,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port)
 
         try:
-            await gateway._runtime.state_ref.ask(
+            await gateway._state_ref.ask(
                 ApplyTopologyCommand(
                     payload={
                         "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
@@ -767,9 +767,9 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
                     "scenes": [],
                 }
             )
-            await gateway._runtime.record_command_intents({"light-1": {"p": True}})
+            await gateway._record_command_intents({"light-1": {"p": True}})
             self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
-            await gateway._runtime.session_ref.ask(
+            await gateway._session_ref.ask(
                 SetSessionStateCommand(GatewaySessionState.DISCONNECTED, ConnectionClosed("closed"))
             )
             await asyncio.sleep(0)
@@ -968,7 +968,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             await gateway.connect()
-            await asyncio.wait_for(gateway._runtime.session.wait_ready(), timeout=0.5)
+            await asyncio.wait_for(gateway._session.wait_ready(), timeout=0.5)
         finally:
             await gateway.close()
 
@@ -982,7 +982,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway.full_prop_timeout = 10.0
 
         try:
-            await gateway._runtime.session_ref.ask(
+            await gateway._session_ref.ask(
                 RpcPushEvent(
                     epoch=0,
                     message={
@@ -994,9 +994,9 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
             )
-            first_sync_id = gateway._runtime.session._sync_id
+            first_sync_id = gateway._session._sync_id
 
-            await gateway._runtime.session_ref.ask(
+            await gateway._session_ref.ask(
                 RpcPushEvent(
                     epoch=0,
                     message={
@@ -1008,14 +1008,14 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
             )
-            active_sync_id = gateway._runtime.session._sync_id
+            active_sync_id = gateway._session._sync_id
             self.assertGreater(active_sync_id, first_sync_id)
-            self.assertEqual(set(gateway._runtime.session._sync_options_by_id), {active_sync_id})
+            self.assertEqual(set(gateway._session._sync_options_by_id), {active_sync_id})
 
-            await gateway._runtime.session_ref.ask(FullPropertySyncTimedOutEvent(sync_id=first_sync_id))
+            await gateway._session_ref.ask(FullPropertySyncTimedOutEvent(sync_id=first_sync_id))
             self.assertEqual(gateway.session_state, GatewaySessionState.WAITING_FULL_PROP)
-            self.assertEqual(gateway._runtime.session._sync_id, active_sync_id)
-            self.assertEqual(set(gateway._runtime.session._sync_options_by_id), {active_sync_id})
+            self.assertEqual(gateway._session._sync_id, active_sync_id)
+            self.assertEqual(set(gateway._session._sync_options_by_id), {active_sync_id})
             self.assertIsNone(gateway.last_full_sync_source)
         finally:
             await gateway.close()
@@ -1110,7 +1110,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             await gateway.connect()
-            await gateway._runtime.session_ref.tell(
+            await gateway._session_ref.tell(
                 RpcPushEvent(
                     epoch=0,
                     message={"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": True}}]},
