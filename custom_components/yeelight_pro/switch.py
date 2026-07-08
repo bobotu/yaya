@@ -12,7 +12,9 @@ from .coordinator import YeelightProCoordinator
 from .core.topology import DeviceType
 from .entity import YeelightProEntity, async_set_node_props
 from .helpers import (
+    bool_param,
     device_type,
+    indexed_props,
     is_double_switch_node,
     is_multi_switch_node,
     node_unique_id,
@@ -50,7 +52,7 @@ def _switch_entities_for_node(coordinator: YeelightProCoordinator, node: Any) ->
     if "0-blp" in node.params:
         entities.append(YeelightProPropertySwitch(coordinator, node, "0-blp", "backlight"))
     if device_type(node) in {DeviceType.AIR_CONDITION, DeviceType.AIR_CONDITION_VRF}:
-        for key in _indexed_props(node, "acrc"):
+        for key in indexed_props(node, "acrc"):
             entities.append(YeelightProPropertySwitch(coordinator, node, key, "remote_controller"))
     return entities
 
@@ -82,12 +84,7 @@ class YeelightProRelaySwitch(YeelightProEntity, SwitchEntity):
         node = self.node
         if node is None:
             return None
-        value = node.params.get(relay_prop_name(node, self._channel))
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, int) and value in (0, 1):
-            return bool(value)
-        return None
+        return bool_param(node, relay_prop_name(node, self._channel))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -137,12 +134,7 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
         node = self.node
         if node is None:
             return None
-        value = node.params.get(self._prop)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, int) and value in (0, 1):
-            return bool(value)
-        return None
+        return bool_param(node, self._prop)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self._async_set_value(True)
@@ -153,11 +145,3 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
     async def _async_set_value(self, value: bool) -> None:
         node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {self._prop: value})
-
-
-def _indexed_props(node: Any, suffix: str) -> tuple[str, ...]:
-    props = []
-    for key in node.params:
-        if isinstance(key, str) and key.endswith(f"-{suffix}") and key.split("-", 1)[0].isdigit():
-            props.append(key)
-    return tuple(sorted(props, key=lambda item: int(item.split("-", 1)[0])))

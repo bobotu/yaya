@@ -7,9 +7,9 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
 from .const import (
@@ -49,7 +49,7 @@ class YeelightProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
         return YeelightProOptionsFlow()
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             host = user_input[CONF_HOST]
@@ -77,7 +77,7 @@ class YeelightProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_import_filter(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_import_filter(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
             return self.async_create_entry(
                 title=self._host,
@@ -100,7 +100,7 @@ class YeelightProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class YeelightProOptionsFlow(config_entries.OptionsFlow):
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
             switch_options = getattr(
                 self, "_switch_options", _selected_switch_options(self.config_entry.options.get(CONF_SWITCH_MODES, {}))

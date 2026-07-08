@@ -6,6 +6,8 @@ from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
 from typing import Any
 
+from ...core.coercion import int_or_none as _int_or_none
+from ...core.coercion import node_id_or_none
 from ...core.protocol import GatewayMethod, list_payload
 from ...core.topology import Topology, TopologyNode
 from ...core.updates import PropertyChange
@@ -195,8 +197,7 @@ class GatewayState:
 
 
 def _item_id(item: Mapping[str, Any]) -> str | int | None:
-    item_id = item.get("id")
-    return item_id if isinstance(item_id, (str, int)) and not isinstance(item_id, bool) else None
+    return node_id_or_none(item.get("id"))
 
 
 def _items_by_id(items: Iterable[Mapping[str, Any]]) -> dict[str | int, Mapping[str, Any]]:
@@ -212,23 +213,10 @@ def _mapping_or_empty(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _int_or_none(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
-
-
 def _room_id(item: Mapping[str, Any]) -> str | int | None:
     for key in ("roomId", "room_id", "roomid", "rid"):
-        value = item.get(key)
-        if isinstance(value, (str, int)) and not isinstance(value, bool):
+        value = node_id_or_none(item.get(key))
+        if value is not None:
             return value
     return None
 
@@ -282,4 +270,4 @@ def _member_ids(value: object) -> list[str | int]:
 def _scalar_ids(value: object) -> list[str | int]:
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, (str, int)) and not isinstance(item, bool)]
+    return [item for raw in value if (item := node_id_or_none(raw)) is not None]

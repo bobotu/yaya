@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..coercion import int_or_none as _int_or_none
 from ..commands import MotorAction, NodeCommand, motor_adjust_action
 from ..topology import TopologyNode
 from .base import Device
@@ -74,19 +75,6 @@ class DreamCurtainDevice(CurtainDevice):
 
     async def stop_tilt(self) -> dict[str, Any]:
         return await self.stop()
-
-
-def _int_or_none(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
 
 
 def curtain_position_known(node: TopologyNode) -> bool:

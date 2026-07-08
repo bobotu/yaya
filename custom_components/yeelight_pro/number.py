@@ -13,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import YeelightProCoordinator
 from .core.topology import DeviceType
 from .entity import YeelightProEntity, async_set_node_props
-from .helpers import device_type, node_unique_id
+from .helpers import device_type, indexed_props, int_param, node_unique_id
 from .platform import async_add_dynamic_entities
 
 PARALLEL_UPDATES = 1
@@ -67,7 +67,7 @@ def _number_entities_for_node(coordinator: YeelightProCoordinator, node: Any) ->
     entities: list[YeelightProEntity] = []
     item = device_type(node)
     if item in {DeviceType.AIR_CONDITION, DeviceType.AIR_CONDITION_VRF}:
-        for key in _indexed_props(node, "acdfltr"):
+        for key in indexed_props(node, "acdfltr"):
             entities.append(
                 YeelightProPropertyNumber(
                     coordinator,
@@ -93,7 +93,7 @@ def _number_entities_for_node(coordinator: YeelightProCoordinator, node: Any) ->
 def _stale_number_unique_ids_for_node(coordinator: YeelightProCoordinator, node: Any) -> tuple[str, ...]:
     if device_type(node) not in {DeviceType.AIR_CONDITION, DeviceType.AIR_CONDITION_VRF}:
         return ()
-    return tuple(node_unique_id(coordinator.gateway_id, node.id, key) for key in _indexed_props(node, "acd"))
+    return tuple(node_unique_id(coordinator.gateway_id, node.id, key) for key in indexed_props(node, "acd"))
 
 
 class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
@@ -125,18 +125,6 @@ class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
         await async_set_node_props(self.coordinator, node, {self.entity_description.key: round(value)})
 
 
-def _indexed_props(node: Any, suffix: str) -> tuple[str, ...]:
-    props = []
-    for key in node.params:
-        if isinstance(key, str) and key.endswith(f"-{suffix}") and key.split("-", 1)[0].isdigit():
-            props.append(key)
-    return tuple(sorted(props, key=lambda item: int(item.split("-", 1)[0])))
-
-
 def _number_param(node: Any, key: str) -> float | None:
-    value = node.params.get(key)
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return float(value)
-    return None
+    value = int_param(node, key)
+    return None if value is None else float(value)

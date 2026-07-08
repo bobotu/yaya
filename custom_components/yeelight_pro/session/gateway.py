@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypeAlias
 
+from ..core.coercion import int_or_none as _int_or_none
+from ..core.coercion import node_key as _node_key
 from ..core.commands import MotorAction, NodeCommand, NodeSet, motor_adjust_action
 from ..core.const import DEFAULT_MESH_NODE_TYPE, GATEWAY_CONTROL_PORT
 from ..core.devices.base import Device
@@ -661,22 +663,3 @@ def _raise_for_missing_write_ack(method: str, response: Mapping[str, Any]) -> No
     if response.get("result") == "ok":
         return
     raise ProtocolError(f"{method} did not return a successful acknowledgement")
-
-
-def _int_or_none(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
-
-
-def _node_key(node_id: object) -> str | None:
-    if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
-        return None
-    return str(node_id)

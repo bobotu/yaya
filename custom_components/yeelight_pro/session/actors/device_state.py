@@ -8,6 +8,8 @@ from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
+from ...core.coercion import node_id_or_none
+from ...core.coercion import node_key as _node_key
 from ...core.protocol import list_payload
 from ...core.topology import TopologyNode
 from ...core.updates import PropertyChange
@@ -355,16 +357,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
 
 
 def _payload_node_id(item: Mapping[str, Any]) -> str | int | None:
-    item_id = item.get("id")
-    if isinstance(item_id, bool) or not isinstance(item_id, (str, int)):
-        return None
-    return item_id
-
-
-def _node_key(node_id: object) -> str | None:
-    if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
-        return None
-    return str(node_id)
+    return node_id_or_none(item.get("id"))
 
 
 async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
