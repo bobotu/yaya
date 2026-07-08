@@ -61,6 +61,5 @@ files = [
     "custom_components/yeelight_pro/session/actors",
     "custom_components/yeelight_pro/session/messages",
     "custom_components/yeelight_pro/session/model",
-    "custom_components/yeelight_pro/session/runtime",
     "custom_components/yeelight_pro/session/transport",
 ]
