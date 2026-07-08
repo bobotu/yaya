@@ -27,7 +27,10 @@ from .entity import YeelightProEntity, async_call_gateway, async_set_node_props
 from .helpers import int_param, light_device_type
 from .platform import async_add_dynamic_entities
 
-PARALLEL_UPDATES = 1
+# The gateway set_prop batcher owns write ordering and conflict splitting.
+# Let Home Assistant fan out multi-entity light service calls concurrently so
+# close-together writes can be batched into one gateway_set.prop request.
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(

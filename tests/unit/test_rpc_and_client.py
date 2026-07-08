@@ -310,6 +310,48 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received[0]["nodes"], [{"id": "light-1", "nt": 2, "set": {"p": True}}])
         self.assertEqual(received[1]["nodes"], [{"id": "light-1", "nt": 2, "set": {"p": False}}])
 
+    async def test_set_prop_batcher_propagates_rpc_failure_to_each_caller(self) -> None:
+        received: list[dict[str, Any]] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                request = parse_line(await reader.readline())
+                received.append(request)
+                writer.write(json.dumps({"id": request["id"], "result": "fail"}, separators=(",", ":")).encode())
+                writer.write(b"\r\n")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
+
+        try:
+            await gateway.connect()
+            results = await asyncio.gather(
+                gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True}),
+                gateway.set_node_props("light-2", {"p": False}, intent_props={"p": False}),
+                return_exceptions=True,
+            )
+        finally:
+            await gateway.close()
+
+        self.assertEqual([request["method"] for request in received], ["gateway_set.prop"])
+        self.assertEqual(
+            received[0]["nodes"],
+            [
+                {"id": "light-1", "nt": 2, "set": {"p": True}},
+                {"id": "light-2", "nt": 2, "set": {"p": False}},
+            ],
+        )
+        self.assertTrue(all(isinstance(result, ProtocolError) for result in results))
+        self.assertEqual(
+            {str(result) for result in results},
+            {"gateway_set.prop did not return a successful acknowledgement"},
+        )
+
     async def test_gateway_rejects_empty_payload_collections_and_invalid_curtain_position(self) -> None:
         gateway = YeelightProGateway("127.0.0.1", port=1)
 
@@ -1327,6 +1369,47 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ActorClosed):
             await asyncio.wait_for(batcher.submit(command, {"light-1": {"p": True}}), timeout=0.2)
         await asyncio.wait_for(close_task, timeout=0.2)
+        self.assertEqual(batcher._pending, [])
+
+    async def test_set_prop_batcher_close_drains_pending_futures(self) -> None:
+        class FakeGateway:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+                self.send_started = asyncio.Event()
+                self.allow_response = asyncio.Event()
+
+            async def _send_node_command_batch(self, requests: Any) -> dict[str, Any]:
+                self.requests.append(requests)
+                self.send_started.set()
+                await self.allow_response.wait()
+                return {"result": "ok"}
+
+        fake_gateway = FakeGateway()
+        batcher = _SetPropBatcher(fake_gateway, delay=60)
+        first_command = (NodeCommand(id="light-1", nt=2, props={"p": True}),)
+        second_command = (NodeCommand(id="light-2", nt=2, props={"p": False}),)
+        first_task = asyncio.create_task(batcher.submit(first_command, {"light-1": {"p": True}}))
+        second_task = asyncio.create_task(batcher.submit(second_command, {"light-2": {"p": False}}))
+
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if len(batcher._pending) == 2:
+                break
+        self.assertEqual(len(batcher._pending), 2)
+
+        close_task = asyncio.create_task(batcher.close())
+        await asyncio.wait_for(fake_gateway.send_started.wait(), timeout=0.2)
+        self.assertFalse(first_task.done())
+        self.assertFalse(second_task.done())
+
+        fake_gateway.allow_response.set()
+        first, second = await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=0.2)
+        await asyncio.wait_for(close_task, timeout=0.2)
+
+        self.assertEqual(first, {"result": "ok"})
+        self.assertEqual(second, {"result": "ok"})
+        self.assertEqual(len(fake_gateway.requests), 1)
+        self.assertEqual(len(fake_gateway.requests[0]), 2)
         self.assertEqual(batcher._pending, [])
 
     async def test_invalid_json_response_closes_connection_and_fails_pending_request(self) -> None:
