@@ -334,7 +334,7 @@ async def test_relay_switch_service_uses_intent_state_until_gateway_push(
         await hass.async_block_till_done()
 
 
-async def test_relay_switch_conflicting_gateway_push_overrides_intent_state(
+async def test_relay_switch_conflicting_gateway_push_resolves_after_intent_expiry(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -357,8 +357,20 @@ async def test_relay_switch_conflicting_gateway_push_overrides_intent_state(
         gateway.update_node_params("switch-1", {"2-sp": True})
         await hass.async_block_till_done()
 
-        assert hass.states.get(switch_entity_id).state == STATE_ON
+        assert hass.states.get(switch_entity_id).state == STATE_OFF
+        assert gateway.has_pending_intent("switch-1", ["2-sp"])
+
+        gateway.expire_command_intents()
+        await hass.async_block_till_done()
+
+        assert gateway.refreshed_node_ids == ["switch-1"]
         assert not gateway.has_pending_intent("switch-1", ["2-sp"])
+        assert hass.states.get(switch_entity_id).state == STATE_UNAVAILABLE
+
+        gateway.update_node_params("switch-1", {"2-sp": True})
+        await hass.async_block_till_done()
+
+        assert hass.states.get(switch_entity_id).state == STATE_ON
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

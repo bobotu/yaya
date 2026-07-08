@@ -184,13 +184,13 @@ class GatewayRPC:
                         queued.future.set_exception(error)
                     continue
 
-                wire_payload = build_request(
-                    queued.method,
-                    request_id=queued.request_id,
-                    payload=queued.payload,
-                    version=self.version,
-                )
                 try:
+                    wire_payload = build_request(
+                        queued.method,
+                        request_id=queued.request_id,
+                        payload=queued.payload,
+                        version=self.version,
+                    )
                     writer.write(wire_payload)
                     await writer.drain()
                     if queued.on_written is not None:
@@ -198,8 +198,8 @@ class GatewayRPC:
                             queued.on_written()
                         except Exception:  # noqa: BLE001 - callbacks must not kill the writer task.
                             _LOGGER.exception("Gateway RPC write callback failed for %s", queued.method)
-                except (ConnectionError, OSError) as exc:
-                    error = ConnectionClosed(str(exc))
+                except Exception as exc:
+                    error = exc if isinstance(exc, YeelightProError) else ConnectionClosed(str(exc))
                     self._pending.pop(queued.request_id, None)
                     if not queued.future.done():
                         queued.future.set_exception(error)

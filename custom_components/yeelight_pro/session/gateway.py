@@ -17,7 +17,7 @@ from ..core.exceptions import ProtocolError
 from ..core.protocol import GatewayMethod
 from ..core.topology import TopologyNode
 from ..core.updates import PropertyChange
-from .actors import Actor, ActorRef, create_actor_task
+from .actors import Actor, ActorClosed, ActorRef, create_actor_task
 from .messages import (
     FullSyncSource,
     GatewayEventReceived,
@@ -359,12 +359,15 @@ class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
         self._pending: list[_PendingSetPropRequest] = []
         self._flush_task: asyncio.Task[None] | None = None
         self._send_tail: asyncio.Task[None] | None = None
+        self._closing = False
 
     async def submit(
         self,
         commands: tuple[NodeCommand | NodeSet, ...],
         intent_props_by_node: Mapping[str | int, Mapping[str, Any]] | None,
     ) -> JSONDict:
+        if self._closing or self.closed:
+            raise ActorClosed("set_prop batcher is closed")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[JSONDict] = loop.create_future()
         await self._ref.ask(
@@ -379,6 +382,7 @@ class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
     async def close(self) -> None:
         if self.closed:
             return
+        self._closing = True
         try:
             await self._ref.ask(_DrainSetPropBatcher())
         finally:
@@ -397,6 +401,10 @@ class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
         raise TypeError(f"unsupported set_prop batcher message: {type(message).__name__}")
 
     async def _submit(self, request: _PendingSetPropRequest) -> None:
+        if self._closing:
+            if not request.future.done():
+                request.future.set_exception(ActorClosed("set_prop batcher is closed"))
+            return
         if self._pending and _batch_conflicts(self._pending, request):
             self._flush_pending()
         self._pending.append(request)

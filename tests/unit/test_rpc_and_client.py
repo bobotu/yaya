@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import types
 import unittest
 from pathlib import Path
 from typing import Any
@@ -13,12 +14,21 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
-from yeelight_pro.core import ConnectionClosed, NodeSet, ProtocolError, RequestTimeout, parse_line  # noqa: E402
+from yeelight_pro.core import (  # noqa: E402
+    ConnectionClosed,
+    NodeCommand,
+    NodeSet,
+    ProtocolError,
+    RequestTimeout,
+    parse_line,
+)
 from yeelight_pro.session import (
     GatewayRPC,  # noqa: E402
     GatewaySessionState,  # noqa: E402
     YeelightProGateway,  # noqa: E402
 )
+from yeelight_pro.session.actors import ActorClosed  # noqa: E402
+from yeelight_pro.session.gateway import _SetPropBatcher  # noqa: E402
 from yeelight_pro.session.messages import (  # noqa: E402
     ApplyTopologyCommand,
     FullPropertySyncTimedOutEvent,
@@ -1294,6 +1304,30 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(response["blob"]), 70 * 1024)
 
+    async def test_set_prop_batcher_rejects_submit_during_close_without_hanging(self) -> None:
+        class FakeGateway:
+            async def _send_node_command_batch(self, _requests: Any) -> dict[str, Any]:
+                return {"result": "ok"}
+
+        batcher = _SetPropBatcher(FakeGateway(), delay=0.05)
+        drain_started = asyncio.Event()
+        original_drain = batcher._drain
+
+        async def slow_drain(self: Any) -> None:
+            await original_drain()
+            drain_started.set()
+            await asyncio.sleep(0.02)
+
+        batcher._drain = types.MethodType(slow_drain, batcher)
+        close_task = asyncio.create_task(batcher.close())
+        await drain_started.wait()
+
+        command = (NodeCommand(id="light-1", nt=2, props={"p": True}),)
+        with self.assertRaises(ActorClosed):
+            await asyncio.wait_for(batcher.submit(command, {"light-1": {"p": True}}), timeout=0.2)
+        await asyncio.wait_for(close_task, timeout=0.2)
+        self.assertEqual(batcher._pending, [])
+
     async def test_rpc_push_listener_exception_does_not_stop_dispatch(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
@@ -1322,6 +1356,28 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await rpc.close()
 
         self.assertEqual([message["method"] for message in messages], ["gateway_post.prop", "gateway_post.event"])
+
+    async def test_writer_loop_exception_closes_connection_and_fails_request(self) -> None:
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await reader.readline()
+                await asyncio.sleep(1)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        rpc = GatewayRPC(host, port=port, request_timeout=0.2)
+
+        try:
+            await rpc.connect()
+            with self.assertRaises(ConnectionClosed):
+                await rpc.request("gateway_get.node", {"id": 1})
+            await asyncio.wait_for(rpc.wait_closed(), timeout=0.5)
+            self.assertFalse(rpc.is_connected)
+            self.assertIsInstance(rpc.last_disconnect_error, ConnectionClosed)
+        finally:
+            await rpc.close()
 
     async def test_request_timeout_marks_connection_closed(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

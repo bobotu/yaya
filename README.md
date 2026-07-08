@@ -123,6 +123,13 @@ its existing entities remain registered but become unavailable.
   when topology does not expose `ch_num` or `cids`. In that case the HA device
   trigger list intentionally exposes key/idx `1..6` so real events are not
   hidden from the automation UI.
+- A gateway push that conflicts with a pending command intent does not
+  immediately override the optimistic visible state. The LAN protocol does not
+  attach timestamps, sequence numbers, or command correlation ids to pushes, so
+  a delayed full/changed-state sync can be indistinguishable from a fresh
+  external change. The integration keeps the command target visible until the
+  intent TTL expires, then marks the node unavailable and issues an
+  authoritative `get_node` refresh to resolve the actual state.
 
 ## CLI
 
