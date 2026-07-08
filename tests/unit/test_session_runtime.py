@@ -328,6 +328,38 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await state.close()
 
+    async def test_device_state_refresh_confirm_clears_reconciling_intent(self) -> None:
+        state = DeviceStateActor(ttl=0.01)
+        state_ref = ActorRef(state)
+        refreshes: list[str | int] = []
+
+        async def refresh(event: object) -> None:
+            refreshes.append(event.node_id)
+            await state_ref.ask(
+                ApplyPropertiesCommand(
+                    payload={"method": "gateway_get.node", "nodes": [{"id": event.node_id, "params": {"p": True}}]},
+                    reason="node refresh",
+                )
+            )
+
+        state.set_refresh_requester(refresh)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload=_topology(False),
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(refreshes, ["light-1"])
+        self.assertFalse(state.has_pending("light-1", ["p"]))
+        self.assertIsNot(state.visible_node("light-1").online, False)
+        self.assertEqual(state.visible_node("light-1").params["p"], True)
+        await state.close()
+
     async def test_device_state_publishes_target_confirmation_for_assumed_state_change(self) -> None:
         state = DeviceStateActor()
         state_ref = ActorRef(state)
@@ -397,7 +429,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await state.close()
 
-    async def test_device_state_empty_refresh_response_marks_expired_props_stale(self) -> None:
+    async def test_device_state_empty_refresh_response_keeps_expired_target_stale(self) -> None:
         state = DeviceStateActor(ttl=0.01)
         state_ref = ActorRef(state)
         refreshes: list[str | int] = []
@@ -424,7 +456,9 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(refreshes, ["light-1"])
-        self.assertIs(state.visible_node("light-1").online, False)
+        self.assertTrue(state.has_pending("light-1", ["p"]))
+        self.assertIsNot(state.visible_node("light-1").online, False)
+        self.assertEqual(state.visible_node("light-1").params["p"], False)
         self.assertEqual(state.diagnostics()["stale"], [{"node_id": "light-1", "properties": ["p"]}])
         await state.close()
 
@@ -458,7 +492,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.diagnostics()["stale"], [])
         await state.close()
 
-    async def test_device_state_expiry_marks_node_unavailable_only_after_refresh_fails(self) -> None:
+    async def test_device_state_expiry_keeps_visible_target_after_refresh_fails(self) -> None:
         state = DeviceStateActor(ttl=0.01)
         state_ref = ActorRef(state)
         snapshots: list[StateSnapshotChanged] = []
@@ -488,14 +522,16 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
 
         self.assertEqual(refreshes, ["light-1"])
-        self.assertFalse(state.has_pending("light-1", ["p"]))
+        self.assertTrue(state.has_pending("light-1", ["p"]))
         self.assertIsNot(state.visible_node("light-1").online, False)
         self.assertNotIn("gateway_intent.expired", [snapshot.message["method"] for snapshot in snapshots])
 
         refresh_failed.set_exception(RuntimeError("refresh failed"))
         await asyncio.sleep(0.01)
 
-        self.assertIs(state.visible_node("light-1").online, False)
+        self.assertTrue(state.has_pending("light-1", ["p"]))
+        self.assertIsNot(state.visible_node("light-1").online, False)
+        self.assertEqual(state.visible_node("light-1").params["p"], False)
         self.assertIn("gateway_intent.expired", [snapshot.message["method"] for snapshot in snapshots])
 
         await state_ref.ask(
@@ -532,8 +568,9 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(refreshes, [(265461, 4)])
-        self.assertFalse(state.has_pending(265461, ["p"]))
-        self.assertIs(state.visible_node(265461).online, False)
+        self.assertTrue(state.has_pending(265461, ["p"]))
+        self.assertIsNot(state.visible_node(265461).online, False)
+        self.assertEqual(state.visible_node(265461).params["p"], True)
 
         await state_ref.ask(
             ApplyGroupsCommand(
@@ -541,6 +578,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 reason="node refresh",
             )
         )
+        self.assertFalse(state.has_pending(265461, ["p"]))
         self.assertIsNot(state.visible_node(265461).online, False)
         self.assertEqual(state.visible_node(265461).params["p"], False)
         await state.close()

@@ -30,6 +30,7 @@ class PendingPropertyIntent:
     updated_at: float
     expires_at: float
     generation: int
+    reconciling: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class PropertyIntentTracker:
         *,
         now: float,
         request_generations: Mapping[str, int] | None = None,
+        settled_generations: Mapping[str, int] | None = None,
     ) -> set[str | int]:
         del now
         normalized = _node_key(node_id)
@@ -141,6 +143,10 @@ class PropertyIntentTracker:
             if request_generations is not None and request_generations.get(prop) != pending.generation:
                 continue
             if value == pending.value:
+                pending_by_prop.pop(prop, None)
+                changed = True
+                continue
+            if settled_generations is not None and settled_generations.get(prop) == pending.generation:
                 pending_by_prop.pop(prop, None)
                 changed = True
         if not pending_by_prop:
@@ -169,14 +175,13 @@ class PropertyIntentTracker:
 
     def expire_pending(self, *, now: float) -> tuple[PendingPropertyIntent, ...]:
         expired: list[PendingPropertyIntent] = []
-        for node_key, pending_by_prop in list(self._pending.items()):
+        for _pending_node_key, pending_by_prop in list(self._pending.items()):
             for prop, pending in list(pending_by_prop.items()):
-                if pending.expires_at > now:
+                if pending.expires_at > now or pending.reconciling:
                     continue
-                pending_by_prop.pop(prop, None)
+                pending = replace(pending, reconciling=True, updated_at=now)
+                pending_by_prop[prop] = pending
                 expired.append(pending)
-            if not pending_by_prop:
-                self._pending.pop(node_key, None)
         expired.sort(key=lambda pending: pending.generation)
         return tuple(expired)
 
@@ -224,7 +229,11 @@ class PropertyIntentTracker:
         return affected
 
     def next_expiration(self, *, now: float) -> float | None:
-        expirations = [pending.expires_at for pending in self._iter_pending() if pending.expires_at > now]
+        expirations = [
+            pending.expires_at
+            for pending in self._iter_pending()
+            if pending.expires_at > now and not pending.reconciling
+        ]
         return min(expirations) if expirations else None
 
     def has_pending(self, node_id: str | int, props: Iterable[str] | None = None) -> bool:
@@ -247,6 +256,7 @@ class PropertyIntentTracker:
                 "inactive_for": round(max(0.0, now - pending.updated_at), 3),
                 "expires_in": round(max(0.0, pending.expires_at - now), 3),
                 "generation": pending.generation,
+                "state": "reconciling" if pending.reconciling else "active",
             }
             for pending in sorted(self._iter_pending(), key=lambda item: item.generation)
         ]
@@ -390,6 +400,7 @@ class CommandIntentRegistry:
         nodes: Mapping[str | int, TopologyNode],
         now: float,
         request_generations: Mapping[str | int, Mapping[str, int]] | None = None,
+        settled_generations: Mapping[str, Mapping[str, int]] | None = None,
     ) -> set[str | int]:
         affected: set[str | int] = set()
         for item in _authoritative_property_items(message):
@@ -397,6 +408,10 @@ class CommandIntentRegistry:
             params = item.get("params")
             if node_id is None or not isinstance(params, Mapping):
                 continue
+            node_generations = None
+            node_key = _node_key(node_id)
+            if settled_generations is not None and node_key is not None:
+                node_generations = settled_generations.get(node_key)
             affected.update(
                 self.properties.apply_authoritative_node(
                     node_id,
@@ -405,41 +420,37 @@ class CommandIntentRegistry:
                     request_generations=None
                     if request_generations is None
                     else _request_generations_for_node(request_generations, node_id),
+                    settled_generations=node_generations,
                 )
             )
         affected.update(self.motor.apply_authoritative_message(message, nodes, now=now))
         return affected
 
     def expire_pending(self, *, now: float) -> tuple[ExpiredIntent, ...]:
-        expired: dict[str, tuple[str | int, dict[str, int]]] = {}
+        expired: dict[str, tuple[str | int, set[str], dict[str, int]]] = {}
         for pending in self.properties.expire_pending(now=now):
             key = _node_key(pending.node_id)
             if key is None:
                 continue
-            current = expired.setdefault(key, (pending.node_id, {}))
-            current[1][pending.prop] = pending.generation
+            current = expired.setdefault(key, (pending.node_id, set(), {}))
+            current[1].add(pending.prop)
+            current[2][pending.prop] = pending.generation
         for track in self.motor.expire_pending(now=now):
             key = _node_key(track.node_id)
             if key is None:
                 continue
-            current = expired.setdefault(key, (track.node_id, {}))
-            current[1].setdefault(track.current_prop, 0)
-            current[1].setdefault(track.target_prop, 0)
+            current = expired.setdefault(key, (track.node_id, set(), {}))
+            current[1].update({track.current_prop, track.target_prop})
         return tuple(
             ExpiredIntent(
                 node_id=node_id,
-                props=tuple(sorted(generations)),
+                props=tuple(sorted(props)),
                 generations=tuple(
-                    sorted(
-                        (
-                            PropertyIntentGeneration(node_id=node_id, prop=prop, generation=generation)
-                            for prop, generation in generations.items()
-                        ),
-                        key=lambda item: item.prop,
-                    )
+                    PropertyIntentGeneration(node_id=node_id, prop=prop, generation=generation)
+                    for prop, generation in sorted(generations.items())
                 ),
             )
-            for node_id, generations in expired.values()
+            for node_id, props, generations in expired.values()
         )
 
     def is_latest_requested(self, node_id: str | int, prop: str, generation: int) -> bool:
