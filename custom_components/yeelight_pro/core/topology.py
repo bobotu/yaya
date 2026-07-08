@@ -5,6 +5,8 @@ from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from typing import Any
 
+from .coercion import int_or_none as _int_or_none
+from .coercion import node_id_or_none as _optional_node_id
 from .protocol import list_payload
 
 NodeId = str | int
@@ -114,15 +116,10 @@ class Topology:
 
 
 def _node_id(value: object) -> NodeId:
-    if isinstance(value, bool) or not isinstance(value, (str, int)):
+    node_id = _optional_node_id(value)
+    if node_id is None:
         raise ValueError("topology node is missing a valid id")
-    return value
-
-
-def _optional_node_id(value: object) -> NodeId | None:
-    if isinstance(value, bool):
-        return None
-    return value if isinstance(value, (str, int)) else None
+    return node_id
 
 
 def _mapping_or_empty(value: object) -> Mapping[str, Any]:
@@ -132,21 +129,6 @@ def _mapping_or_empty(value: object) -> Mapping[str, Any]:
 def _int_or_default(value: object, default: int) -> int:
     result = _int_or_none(value)
     return default if result is None else result
-
-
-def _int_or_none(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, IntEnum):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
 
 
 def _int_items(value: object) -> list[int]:

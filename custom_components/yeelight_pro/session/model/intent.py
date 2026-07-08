@@ -4,6 +4,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ...core.coercion import int_or_none as _int_or_none
+from ...core.coercion import node_id_or_none
+from ...core.coercion import node_key as _node_key
 from ...core.topology import TopologyNode
 from .motor import (
     MOTOR_TARGET_ANGLE_PROP,
@@ -371,8 +374,7 @@ class CommandIntentRegistry:
 
 
 def _item_id(item: Mapping[str, Any]) -> str | int | None:
-    item_id = item.get("id")
-    return item_id if isinstance(item_id, (str, int)) and not isinstance(item_id, bool) else None
+    return node_id_or_none(item.get("id"))
 
 
 def _trackable_property_props(props: Mapping[str, Any]) -> dict[str, Any]:
@@ -381,22 +383,3 @@ def _trackable_property_props(props: Mapping[str, Any]) -> dict[str, Any]:
         for prop, value in props.items()
         if isinstance(prop, str) and prop not in {MOTOR_TARGET_POSITION_PROP, MOTOR_TARGET_ANGLE_PROP}
     }
-
-
-def _node_key(node_id: object) -> str | None:
-    if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
-        return None
-    return str(node_id)
-
-
-def _int_or_none(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None

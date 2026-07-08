@@ -4,6 +4,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from .coercion import int_or_none as _int_or_none
 from .protocol import GatewayMethod
 
 
@@ -91,16 +92,3 @@ def iter_gateway_events(message: Mapping[str, Any]) -> Iterator[GatewayEvent]:
             value=value,
             params=params if isinstance(params, Mapping) else {},
         )
-
-
-def _int_or_none(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None

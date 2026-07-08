@@ -14,6 +14,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import YeelightProCoordinator
 from .core import is_knob_capable
 from .entity import YeelightProEntity
+from .helpers import int_param
 from .platform import async_add_dynamic_entities
 
 PARALLEL_UPDATES = 0
@@ -48,14 +49,14 @@ SENSOR_DESCRIPTIONS: tuple[YeelightProSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         native_unit_of_measurement=PERCENTAGE,
         exists_fn=lambda node: "bp" in node.params or is_knob_capable(node),
-        value_fn=lambda node: _int_param(node, "bp"),
+        value_fn=lambda node: int_param(node, "bp"),
     ),
     YeelightProSensorDescription(
         key="light_level",
         translation_key="light_level",
         entity_category=EntityCategory.DIAGNOSTIC,
         exists_fn=lambda node: "level" in node.params,
-        value_fn=lambda node: _int_param(node, "level"),
+        value_fn=lambda node: int_param(node, "level"),
     ),
     YeelightProSensorDescription(
         key="luminance",
@@ -64,7 +65,7 @@ SENSOR_DESCRIPTIONS: tuple[YeelightProSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement="lx",
         exists_fn=lambda node: "luminance" in node.params,
-        value_fn=lambda node: _int_param(node, "luminance"),
+        value_fn=lambda node: int_param(node, "luminance"),
     ),
     YeelightProSensorDescription(
         key="humidity",
@@ -73,7 +74,7 @@ SENSOR_DESCRIPTIONS: tuple[YeelightProSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         exists_fn=lambda node: "h" in node.params,
-        value_fn=lambda node: _int_param(node, "h"),
+        value_fn=lambda node: int_param(node, "h"),
     ),
     YeelightProSensorDescription(
         key="temperature",
@@ -115,15 +116,6 @@ class YeelightProSensor(YeelightProEntity, SensorEntity):
         return self.entity_description.value_fn(node)
 
 
-def _int_param(node: Any, key: str) -> int | None:
-    value = node.params.get(key)
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    return None
-
-
 def _scaled_int_param(node: Any, key: str, scale: int) -> float | None:
-    value = _int_param(node, key)
+    value = int_param(node, key)
     return None if value is None else value / scale
