@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 from ...core.updates import PropertyChange
+from ..model.intent import ExpiredIntent
 from ..model.motor import MotorTargetIntent
 from .enums import FullSyncSource, StateChangeReason
 from .public import SessionStatusChanged
@@ -43,6 +44,12 @@ class RecordCommandIntentCommand:
 @dataclass(frozen=True)
 class ExpireCommandIntentsCommand:
     pass
+
+
+@dataclass(frozen=True)
+class ResolveExpiredIntentRefreshCommand:
+    expired: tuple[ExpiredIntent, ...]
+    failed: bool
 
 
 @dataclass(frozen=True)
@@ -96,6 +103,7 @@ DeviceStateActorMessage: TypeAlias = (
     | ApplyScenesCommand
     | RecordCommandIntentCommand
     | ExpireCommandIntentsCommand
+    | ResolveExpiredIntentRefreshCommand
     | SyncStartedEvent
     | SyncCompletedEvent
     | SessionStatusChanged

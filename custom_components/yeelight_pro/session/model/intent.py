@@ -48,18 +48,15 @@ class PropertyIntentTracker:
         now: float,
         current_params: Mapping[str, Any] | None = None,
     ) -> set[str | int]:
+        del current_params
         normalized = _node_key(node_id)
         if normalized is None:
             return set()
-        current_params = current_params or {}
         pending_by_prop = self._pending.setdefault(normalized, {})
         changed = False
         expires_at = now + self.ttl
         for prop, value in props.items():
             if not isinstance(prop, str):
-                continue
-            if current_params.get(prop) == value:
-                changed = pending_by_prop.pop(prop, None) is not None or changed
                 continue
             self._generation += 1
             pending_by_prop[prop] = PendingPropertyIntent(

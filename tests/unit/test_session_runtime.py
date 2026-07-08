@@ -254,7 +254,17 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         state = DeviceStateActor(ttl=0.01)
         state_ref = ActorRef(state)
         refreshes: list[str | int] = []
-        state.set_refresh_requester(lambda event: refreshes.append(event.node_id))
+
+        async def refresh(event: object) -> None:
+            refreshes.append(event.node_id)
+            await state_ref.ask(
+                ApplyPropertiesCommand(
+                    payload={"method": "gateway_get.node", "nodes": [{"id": event.node_id, "params": {"p": False}}]},
+                    reason="node refresh",
+                )
+            )
+
+        state.set_refresh_requester(refresh)
 
         await state_ref.ask(
             ApplyTopologyCommand(
@@ -279,16 +289,56 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(refreshes, ["light-1"])
         self.assertFalse(state.has_pending("light-1", ["p"]))
-        self.assertIs(state.visible_node("light-1").online, False)
+        self.assertIsNot(state.visible_node("light-1").online, False)
+        self.assertEqual(state.visible_node("light-1").params["p"], False)
         await state.close()
 
-    async def test_device_state_expiry_marks_node_unavailable_until_fresh_state_arrives(self) -> None:
+    async def test_device_state_empty_refresh_response_marks_expired_props_stale(self) -> None:
+        state = DeviceStateActor(ttl=0.01)
+        state_ref = ActorRef(state)
+        refreshes: list[str | int] = []
+
+        async def refresh(event: object) -> None:
+            refreshes.append(event.node_id)
+            await state_ref.ask(
+                ApplyPropertiesCommand(
+                    payload={"method": "gateway_get.node", "nodes": []},
+                    reason="node refresh",
+                )
+            )
+
+        state.set_refresh_requester(refresh)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload=_topology(True),
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": False}}))
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(refreshes, ["light-1"])
+        self.assertIs(state.visible_node("light-1").online, False)
+        self.assertEqual(state.diagnostics()["stale"], [{"node_id": "light-1", "properties": ["p"]}])
+        await state.close()
+
+    async def test_device_state_expiry_marks_node_unavailable_only_after_refresh_fails(self) -> None:
         state = DeviceStateActor(ttl=0.01)
         state_ref = ActorRef(state)
         snapshots: list[StateSnapshotChanged] = []
         refreshes: list[str | int] = []
         state.add_state_listener(snapshots.append)
-        state.set_refresh_requester(lambda event: refreshes.append(event.node_id))
+        refresh_started = asyncio.Event()
+        refresh_failed = asyncio.get_running_loop().create_future()
+
+        async def fail_refresh(event: object) -> None:
+            refreshes.append(event.node_id)
+            refresh_started.set()
+            await refresh_failed
+
+        state.set_refresh_requester(fail_refresh)
 
         await state_ref.ask(
             ApplyTopologyCommand(
@@ -301,10 +351,16 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.visible_node("light-1").params["p"], False)
 
         snapshots.clear()
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
 
         self.assertEqual(refreshes, ["light-1"])
         self.assertFalse(state.has_pending("light-1", ["p"]))
+        self.assertIsNot(state.visible_node("light-1").online, False)
+        self.assertNotIn("gateway_intent.expired", [snapshot.message["method"] for snapshot in snapshots])
+
+        refresh_failed.set_exception(RuntimeError("refresh failed"))
+        await asyncio.sleep(0.01)
+
         self.assertIs(state.visible_node("light-1").online, False)
         self.assertIn("gateway_intent.expired", [snapshot.message["method"] for snapshot in snapshots])
 
@@ -353,6 +409,82 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNot(state.visible_node(265461).online, False)
         self.assertEqual(state.visible_node(265461).params["p"], False)
+        await state.close()
+
+    async def test_device_state_group_refresh_payload_clears_refreshing_without_stale(self) -> None:
+        state = DeviceStateActor(ttl=0.01)
+        state_ref = ActorRef(state)
+        refreshes: list[tuple[str | int, int | None]] = []
+
+        async def refresh_group(event: object) -> None:
+            refreshes.append((event.node_id, event.node_type))
+            await state_ref.ask(
+                ApplyGroupsCommand(
+                    payload={
+                        "method": "gateway_get.group",
+                        "groups": [{"id": event.node_id, "nt": 4, "params": {"p": False}}],
+                    },
+                    reason="node refresh",
+                )
+            )
+
+        state.set_refresh_requester(refresh_group)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload={
+                    "nodes": [{"id": 265461, "nt": 4, "type": 3, "params": {"p": True}}],
+                    "groups": [{"id": 265461, "nt": 4, "params": {"p": True}}],
+                    "rooms": [],
+                    "scenes": [],
+                },
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({265461: {"p": False}}))
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(refreshes, [(265461, 4)])
+        diagnostics = state.diagnostics()
+        self.assertEqual(diagnostics["stale"], [])
+        self.assertEqual(diagnostics["refreshing"], [])
+        self.assertIsNot(state.visible_node(265461).online, False)
+        self.assertEqual(state.visible_node(265461).params["p"], False)
+        await state.close()
+
+    async def test_device_state_expiry_keeps_partial_refresh_property_granularity(self) -> None:
+        state = DeviceStateActor(ttl=0.01)
+        state_ref = ActorRef(state)
+
+        async def partial_refresh(event: object) -> None:
+            await state_ref.ask(
+                ApplyPropertiesCommand(
+                    payload={"method": "gateway_get.node", "nodes": [{"id": event.node_id, "params": {"p": False}}]},
+                    reason="node refresh",
+                )
+            )
+
+        state.set_refresh_requester(partial_refresh)
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload={
+                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True, "l": 10}}],
+                    "groups": [],
+                    "rooms": [],
+                    "scenes": [],
+                },
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": False, "l": 80}}))
+        await asyncio.sleep(0.05)
+
+        diagnostics = state.diagnostics()
+        self.assertEqual(diagnostics["stale"], [{"node_id": "light-1", "properties": ["l"]}])
+        self.assertEqual(diagnostics["refreshing"], [])
         await state.close()
 
     async def test_device_state_masks_transition_intermediate_values_until_targets_confirm(self) -> None:
