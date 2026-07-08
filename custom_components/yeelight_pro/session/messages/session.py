@@ -48,6 +48,7 @@ class FullPropertySyncTimedOutEvent:
 @dataclass(frozen=True)
 class RefreshNodeCommand:
     node_id: str | int
+    node_type: int | None = None
 
 
 SessionActorMessage: TypeAlias = (

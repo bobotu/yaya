@@ -20,6 +20,7 @@ from yeelight_pro.session.actors import (  # noqa: E402
     create_actor_task,
 )
 from yeelight_pro.session.messages import (  # noqa: E402
+    ApplyGroupsCommand,
     ApplyPropertiesCommand,
     ApplyTopologyCommand,
     RecordCommandIntentCommand,
@@ -315,6 +316,43 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNot(state.visible_node("light-1").online, False)
         self.assertEqual(state.visible_node("light-1").params["p"], True)
+        await state.close()
+
+    async def test_device_state_group_refresh_clears_stale_mesh_group_node(self) -> None:
+        state = DeviceStateActor(ttl=0.01)
+        state_ref = ActorRef(state)
+        refreshes: list[tuple[str | int, int | None]] = []
+        state.set_refresh_requester(lambda event: refreshes.append((event.node_id, event.node_type)))
+
+        await state_ref.ask(
+            ApplyTopologyCommand(
+                payload={
+                    "nodes": [{"id": 265461, "nt": 4, "type": 3, "params": {"p": False, "l": 20}}],
+                    "groups": [{"id": 265461, "nt": 4, "params": {"p": False, "l": 20}}],
+                    "rooms": [],
+                    "scenes": [],
+                },
+                reason="topology sync",
+                message={"method": "gateway_sync.topology"},
+            )
+        )
+        await state_ref.ask(RecordCommandIntentCommand({265461: {"p": True}}))
+        self.assertEqual(state.visible_node(265461).params["p"], True)
+
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(refreshes, [(265461, 4)])
+        self.assertFalse(state.has_pending(265461, ["p"]))
+        self.assertIs(state.visible_node(265461).online, False)
+
+        await state_ref.ask(
+            ApplyGroupsCommand(
+                payload={"method": "gateway_get.group", "groups": [{"id": 265461, "nt": 4, "params": {"p": False}}]},
+                reason="node refresh",
+            )
+        )
+        self.assertIsNot(state.visible_node(265461).online, False)
+        self.assertEqual(state.visible_node(265461).params["p"], False)
         await state.close()
 
     async def test_device_state_masks_transition_intermediate_values_until_targets_confirm(self) -> None:
