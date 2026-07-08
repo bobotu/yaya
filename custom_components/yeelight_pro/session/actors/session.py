@@ -12,6 +12,7 @@ from typing import Any
 from ...core.events import iter_gateway_events
 from ...core.exceptions import YeelightProError
 from ...core.protocol import GatewayMethod
+from ...core.topology import NodeType
 from ..messages import (
     ApplyGenericStateMessageCommand,
     ApplyGroupsCommand,
@@ -193,7 +194,7 @@ class SessionActor(Actor[SessionActorMessage]):
             await self._handle_full_property_timeout(message)
             return None
         if isinstance(message, RefreshNodeCommand):
-            return await self._refresh_node(message.node_id)
+            return await self._refresh_node(message.node_id, message.node_type)
         if isinstance(message, ConnectionOnlineEvent):
             await self._handle_connection_online(message)
             return None
@@ -335,8 +336,17 @@ class SessionActor(Actor[SessionActorMessage]):
             error,
         )
 
-    async def _refresh_node(self, node_id: str | int) -> JSONDict:
-        _LOGGER.debug("Yeelight Pro refreshing node: node_id=%s", node_id)
+    async def _refresh_node(self, node_id: str | int, node_type: int | None) -> JSONDict:
+        _LOGGER.debug("Yeelight Pro refreshing node: node_id=%s node_type=%s", node_id, node_type)
+        if _is_mesh_group_node(node_type):
+            result = await self._get_group(node_id)
+            _LOGGER.debug(
+                "Yeelight Pro refresh group response: node_id=%s summary=%s",
+                node_id,
+                _message_summary(result),
+            )
+            await self.device_state_ref.ask(ApplyGroupsCommand(payload=result, reason=StateChangeReason.NODE_REFRESH))
+            return result
         result = await self._get_node(node_id)
         _LOGGER.debug("Yeelight Pro refresh node response: node_id=%s summary=%s", node_id, _message_summary(result))
         await self.device_state_ref.ask(ApplyPropertiesCommand(payload=result, reason=StateChangeReason.NODE_REFRESH))
@@ -461,6 +471,10 @@ def _node_summary(item: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(params, Mapping):
         summary["params"] = dict(params)
     return summary
+
+
+def _is_mesh_group_node(node_type: int | None) -> bool:
+    return node_type == NodeType.MESH_GROUP
 
 
 async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:

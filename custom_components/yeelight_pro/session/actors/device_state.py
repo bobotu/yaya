@@ -116,8 +116,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         if isinstance(message, ApplyGenericStateMessageCommand):
             return await self._apply_generic_message(message)
         if isinstance(message, ApplyGroupsCommand):
-            self.state.apply_groups(message.payload)
-            return None
+            return await self._apply_groups(message)
         if isinstance(message, ApplyRoomsCommand):
             self.state.apply_rooms(message.payload)
             return None
@@ -156,6 +155,20 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             active_topology_node_ids=None,
         )
         return AppliedPropertiesResult(changes=changes, full_property_coverage=full_coverage)
+
+    async def _apply_groups(self, message: ApplyGroupsCommand) -> None:
+        changes = tuple(self.state.apply_groups(message.payload))
+        if message.reason is None:
+            if changes:
+                self._rebuild_visible_cache()
+                for change in changes:
+                    await self._notify_property(change)
+            return
+        await self._after_authoritative_changed(
+            AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload, changes=changes),
+            topology_changed=False,
+            active_topology_node_ids=None,
+        )
 
     async def _apply_generic_message(self, message: ApplyGenericStateMessageCommand) -> None:
         self.state.apply_message(message.payload)
@@ -292,8 +305,12 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         if self._refresh_requester is None:
             return
         for node_id in affected:
+            node = self.state.nodes.get(node_id)
             create_actor_task(
-                _call_listener(self._refresh_requester, RefreshNodeRequestedEvent(node_id=node_id)),
+                _call_listener(
+                    self._refresh_requester,
+                    RefreshNodeRequestedEvent(node_id=node_id, node_type=node.nt if node is not None else None),
+                ),
                 name=f"yeelight-pro-refresh-node-{node_id}",
             )
 
@@ -313,7 +330,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
 
     def _clear_stale_from_message(self, message: Mapping[str, Any]) -> set[str | int]:
         affected: set[str | int] = set()
-        for item in list_payload(message, "nodes"):
+        for item in _authoritative_property_items(message):
             node_id = _payload_node_id(item)
             params = item.get("params")
             if node_id is None or not isinstance(params, Mapping):
@@ -476,6 +493,11 @@ def _expired_summary(expired: Iterable[Any]) -> tuple[dict[str, Any], ...]:
 
 def _stale_summary(stale: Mapping[str, tuple[str | int, set[str]]]) -> dict[str, tuple[str, ...]]:
     return {str(node_id): tuple(sorted(props)) for node_id, props in stale.values()}
+
+
+def _authoritative_property_items(message: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+    yield from list_payload(message, "nodes")
+    yield from list_payload(message, "groups")
 
 
 async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:

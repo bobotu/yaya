@@ -206,7 +206,10 @@ class YeelightProGateway:
         return await self.request(GatewayMethod.GET_NODE, _id_payload(0))
 
     async def refresh_node(self, node_id: str | int) -> JSONDict:
-        return await self._session_ref.ask(RefreshNodeCommand(node_id=node_id))
+        node = self.state.nodes.get(node_id)
+        return await self._session_ref.ask(
+            RefreshNodeCommand(node_id=node_id, node_type=node.nt if node is not None else None)
+        )
 
     async def get_group(self, group_id: str | int | None = 0) -> JSONDict:
         return await self.request(GatewayMethod.GET_GROUP, _id_payload(group_id))
@@ -405,8 +408,12 @@ class YeelightProGateway:
         )
 
     async def _handle_refresh_requested(self, event: RefreshNodeRequestedEvent) -> None:
-        _LOGGER.debug("Yeelight Pro refresh requested after intent expiry: node_id=%s", event.node_id)
-        await self._session_ref.ask(RefreshNodeCommand(node_id=event.node_id))
+        _LOGGER.debug(
+            "Yeelight Pro refresh requested after intent expiry: node_id=%s node_type=%s",
+            event.node_id,
+            event.node_type,
+        )
+        await self._session_ref.ask(RefreshNodeCommand(node_id=event.node_id, node_type=event.node_type))
 
 
 @dataclass(frozen=True)

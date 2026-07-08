@@ -30,6 +30,7 @@ class AuthoritativeStateChangedEvent:
 @dataclass(frozen=True)
 class RefreshNodeRequestedEvent:
     node_id: str | int
+    node_type: int | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class ApplyGenericStateMessageCommand:
 @dataclass(frozen=True)
 class ApplyGroupsCommand:
     payload: Mapping[str, Any]
+    reason: StateChangeReason | None = None
 
 
 @dataclass(frozen=True)
