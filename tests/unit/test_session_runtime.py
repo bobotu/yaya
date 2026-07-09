@@ -255,6 +255,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         state = DeviceStateActor(ttl=0.01)
         state_ref = ActorRef(state)
         refreshes: list[str | int] = []
+        refresh_seen = asyncio.Event()
 
         async def refresh(event: object) -> None:
             refreshes.append(event.node_id)
@@ -264,6 +265,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     reason="node refresh",
                 )
             )
+            refresh_seen.set()
 
         state.set_refresh_requester(refresh)
 
@@ -287,11 +289,13 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.visible_node("light-1").params["p"], True)
 
         await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
-        await asyncio.sleep(0.05)
-        self.assertEqual(refreshes, ["light-1"])
-        self.assertFalse(state.has_pending("light-1", ["p"]))
+        await asyncio.wait_for(refresh_seen.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        self.assertEqual(len(refreshes), 1)
+        self.assertEqual(refreshes[0], "light-1")
+        self.assertTrue(state.has_pending("light-1", ["p"]))
         self.assertIsNot(state.visible_node("light-1").online, False)
-        self.assertEqual(state.visible_node("light-1").params["p"], False)
+        self.assertEqual(state.visible_node("light-1").params["p"], True)
         await state.close()
 
     async def test_device_state_suppresses_mismatched_push_hidden_by_intent(self) -> None:
@@ -457,7 +461,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(refreshes, ["light-1"])
         self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertIsNot(state.visible_node("light-1").online, False)
+        self.assertEqual(state.visible_node("light-1").online, False)
         self.assertEqual(state.visible_node("light-1").params["p"], False)
         self.assertEqual(state.diagnostics()["stale"], [{"node_id": "light-1", "properties": ["p"]}])
         await state.close()
@@ -530,7 +534,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.01)
 
         self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertIsNot(state.visible_node("light-1").online, False)
+        self.assertEqual(state.visible_node("light-1").online, False)
         self.assertEqual(state.visible_node("light-1").params["p"], False)
         self.assertIn("gateway_intent.expired", [snapshot.message["method"] for snapshot in snapshots])
 
@@ -569,7 +573,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(refreshes, [(265461, 4)])
         self.assertTrue(state.has_pending(265461, ["p"]))
-        self.assertIsNot(state.visible_node(265461).online, False)
+        self.assertEqual(state.visible_node(265461).online, False)
         self.assertEqual(state.visible_node(265461).params["p"], True)
 
         await state_ref.ask(
