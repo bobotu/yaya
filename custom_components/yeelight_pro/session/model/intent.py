@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import Any
 
 from ...core.coercion import int_or_none as _int_or_none
@@ -19,6 +20,16 @@ from .motor import (
 )
 
 COMMAND_INTENT_TTL = 5.0
+COMMAND_INTENT_HARD_TTL = 20.0
+COMMAND_INTENT_MAX_REFRESH_MISMATCHES = 3
+
+
+class IntentObservationDecision(StrEnum):
+    CONFIRM_TARGET = "confirm_target"
+    SUPPORT_PROGRESS = "support_progress"
+    WEAK_CONFLICT = "weak_conflict"
+    STRONG_CONFLICT = "strong_conflict"
+    IGNORE = "ignore"
 
 
 @dataclass(frozen=True)
@@ -26,10 +37,13 @@ class PendingPropertyIntent:
     node_id: str | int
     prop: str
     value: Any
+    baseline: Any
     created_at: float
     updated_at: float
     expires_at: float
+    hard_expires_at: float
     generation: int
+    refresh_mismatches: int = 0
     reconciling: bool = False
 
 
@@ -51,11 +65,35 @@ class CommandIntentToken:
         return generations
 
 
+@dataclass(frozen=True)
+class IntentObservation:
+    node_id: str | int
+    prop: str
+    value: Any
+    request_generation: int | None = None
+
+
+@dataclass(frozen=True)
+class IntentObservationResult:
+    affected: set[str | int]
+    stale_affected: set[str | int]
+    refreshing_affected: set[str | int]
+    decisions: tuple[dict[str, Any], ...] = ()
+
+
 class PropertyIntentTracker:
     """Tracks ACKed property targets until matching authoritative state arrives."""
 
-    def __init__(self, *, ttl: float = COMMAND_INTENT_TTL) -> None:
+    def __init__(
+        self,
+        *,
+        ttl: float = COMMAND_INTENT_TTL,
+        hard_ttl: float = COMMAND_INTENT_HARD_TTL,
+        max_refresh_mismatches: int = COMMAND_INTENT_MAX_REFRESH_MISMATCHES,
+    ) -> None:
         self.ttl = ttl
+        self.hard_ttl = hard_ttl
+        self.max_refresh_mismatches = max_refresh_mismatches
         self._latest_requested: dict[str, dict[str, int]] = {}
         self._pending: dict[str, dict[str, PendingPropertyIntent]] = {}
 
@@ -88,7 +126,6 @@ class PropertyIntentTracker:
         current_params: Mapping[str, Any] | None = None,
         generations: Mapping[str, int] | None = None,
     ) -> set[str | int]:
-        del current_params
         normalized = _node_key(node_id)
         if normalized is None:
             return set()
@@ -107,9 +144,11 @@ class PropertyIntentTracker:
                 node_id=node_id,
                 prop=prop,
                 value=value,
+                baseline=None if current_params is None else current_params.get(prop),
                 created_at=now,
                 updated_at=now,
                 expires_at=expires_at,
+                hard_expires_at=now + self.hard_ttl,
                 generation=generation,
             )
             changed = True
@@ -124,34 +163,54 @@ class PropertyIntentTracker:
         *,
         now: float,
         request_generations: Mapping[str, int] | None = None,
-        settled_generations: Mapping[str, int] | None = None,
-    ) -> set[str | int]:
-        del now
+    ) -> tuple[set[str | int], tuple[dict[str, Any], ...]]:
         normalized = _node_key(node_id)
         if normalized is None:
-            return set()
+            return set(), ()
         pending_by_prop = self._pending.get(normalized)
         if pending_by_prop is None:
-            return set()
+            return set(), ()
         changed = False
+        decisions: list[dict[str, Any]] = []
         for prop, value in params.items():
             if not isinstance(prop, str):
                 continue
             pending = pending_by_prop.get(prop)
             if pending is None:
                 continue
-            if request_generations is not None and request_generations.get(prop) != pending.generation:
+            request_generation = None if request_generations is None else request_generations.get(prop)
+            observation = IntentObservation(
+                node_id=node_id,
+                prop=prop,
+                value=value,
+                request_generation=request_generation,
+            )
+            decision = self._evaluate_observation(pending, observation, now=now)
+            if decision is IntentObservationDecision.IGNORE:
                 continue
-            if value == pending.value:
+            decisions.append(
+                {
+                    "node_id": str(node_id),
+                    "property": prop,
+                    "target": pending.value,
+                    "observed": value,
+                    "generation": pending.generation,
+                    "request_generation": request_generation,
+                    "decision": decision.value,
+                    "age": round(max(0.0, now - pending.created_at), 3),
+                }
+            )
+            if decision in {IntentObservationDecision.CONFIRM_TARGET, IntentObservationDecision.STRONG_CONFLICT}:
                 pending_by_prop.pop(prop, None)
                 changed = True
                 continue
-            if settled_generations is not None and settled_generations.get(prop) == pending.generation:
-                pending_by_prop.pop(prop, None)
+            updated = self._updated_pending_after_observation(pending, decision, now=now)
+            if updated != pending:
+                pending_by_prop[prop] = updated
                 changed = True
         if not pending_by_prop:
             self._pending.pop(normalized, None)
-        return {node_id} if changed else set()
+        return ({node_id} if changed else set()), tuple(decisions)
 
     def is_latest_requested(self, node_id: str | int, prop: str, generation: int) -> bool:
         normalized = _node_key(node_id)
@@ -184,6 +243,26 @@ class PropertyIntentTracker:
                 expired.append(pending)
         expired.sort(key=lambda pending: pending.generation)
         return tuple(expired)
+
+    def clear_matching_generations(self, node_id: str | int, generations: Mapping[str, int | None]) -> set[str | int]:
+        normalized = _node_key(node_id)
+        if normalized is None:
+            return set()
+        pending_by_prop = self._pending.get(normalized)
+        if pending_by_prop is None:
+            return set()
+        changed = False
+        for prop, generation in generations.items():
+            pending = pending_by_prop.get(prop)
+            if pending is None:
+                continue
+            if generation is not None and pending.generation != generation:
+                continue
+            pending_by_prop.pop(prop, None)
+            changed = True
+        if not pending_by_prop:
+            self._pending.pop(normalized, None)
+        return {node_id} if changed else set()
 
     def clear_props(self, node_id: str | int, props: Iterable[str]) -> set[str | int]:
         normalized = _node_key(node_id)
@@ -276,6 +355,48 @@ class PropertyIntentTracker:
         for pending_by_prop in self._pending.values():
             yield from pending_by_prop.values()
 
+    def _evaluate_observation(
+        self,
+        pending: PendingPropertyIntent,
+        observation: IntentObservation,
+        *,
+        now: float,
+    ) -> IntentObservationDecision:
+        if observation.request_generation is not None and observation.request_generation != pending.generation:
+            return IntentObservationDecision.IGNORE
+        if observation.value == pending.value:
+            return IntentObservationDecision.CONFIRM_TARGET
+        if not pending.reconciling and observation.request_generation is None:
+            return IntentObservationDecision.WEAK_CONFLICT
+        if now >= pending.hard_expires_at:
+            return IntentObservationDecision.STRONG_CONFLICT
+        if _supports_progress(pending.baseline, observation.value, pending.value):
+            return IntentObservationDecision.SUPPORT_PROGRESS
+        if observation.request_generation == pending.generation or pending.reconciling:
+            if pending.refresh_mismatches + 1 >= self.max_refresh_mismatches:
+                return IntentObservationDecision.STRONG_CONFLICT
+            return IntentObservationDecision.WEAK_CONFLICT
+        return IntentObservationDecision.WEAK_CONFLICT
+
+    def _updated_pending_after_observation(
+        self,
+        pending: PendingPropertyIntent,
+        decision: IntentObservationDecision,
+        *,
+        now: float,
+    ) -> PendingPropertyIntent:
+        if decision is IntentObservationDecision.SUPPORT_PROGRESS:
+            return replace(pending, updated_at=now, expires_at=now + self.ttl, reconciling=False)
+        if decision is IntentObservationDecision.WEAK_CONFLICT and pending.reconciling:
+            return replace(
+                pending,
+                updated_at=now,
+                expires_at=now + self.ttl,
+                refresh_mismatches=pending.refresh_mismatches + 1,
+                reconciling=False,
+            )
+        return pending
+
 
 class MotorIntentTracker:
     """Adapter around motor tracking so registry owns all in-flight command state."""
@@ -350,6 +471,8 @@ class CommandIntentRegistry:
     def __init__(self, *, ttl: float = COMMAND_INTENT_TTL, motor_tracking_ttl: float = MOTOR_TRACKING_TTL) -> None:
         self.properties = PropertyIntentTracker(ttl=ttl)
         self.motor = MotorIntentTracker(ttl=motor_tracking_ttl)
+        self._stale_node_props: dict[str, tuple[str | int, dict[str, int | None]]] = {}
+        self._refreshing_expired_props: dict[str, tuple[str | int, dict[str, int | None]]] = {}
 
     def prepare_property_intents(
         self,
@@ -371,6 +494,8 @@ class CommandIntentRegistry:
         affected: set[str | int] = set()
         generations_by_node = token.by_node() if token is not None else None
         for node_id, props in props_by_node.items():
+            affected.update(self._clear_stale_props(node_id, props))
+            affected.update(self._clear_refreshing_props(node_id, props))
             node = nodes.get(node_id)
             current_params = node.params if node is not None else {}
             affected.update(
@@ -400,31 +525,45 @@ class CommandIntentRegistry:
         nodes: Mapping[str | int, TopologyNode],
         now: float,
         request_generations: Mapping[str | int, Mapping[str, int]] | None = None,
-        settled_generations: Mapping[str, Mapping[str, int]] | None = None,
-    ) -> set[str | int]:
+    ) -> IntentObservationResult:
         affected: set[str | int] = set()
+        stale_affected: set[str | int] = set()
+        refreshing_affected: set[str | int] = set()
+        decisions: list[dict[str, Any]] = []
         for item in _authoritative_property_items(message):
             node_id = _item_id(item)
             params = item.get("params")
             if node_id is None or not isinstance(params, Mapping):
                 continue
-            node_generations = None
-            node_key = _node_key(node_id)
-            if settled_generations is not None and node_key is not None:
-                node_generations = settled_generations.get(node_key)
-            affected.update(
-                self.properties.apply_authoritative_node(
+            stale_generations = self._stale_generations_for_props(node_id, params)
+            if stale_generations:
+                affected.update(self.properties.clear_matching_generations(node_id, stale_generations))
+            node_request_generations = (
+                None if request_generations is None else _request_generations_for_node(request_generations, node_id)
+            )
+            property_affected, property_decisions = self.properties.apply_authoritative_node(
+                node_id,
+                params,
+                now=now,
+                request_generations=node_request_generations,
+            )
+            affected.update(property_affected)
+            decisions.extend(property_decisions)
+            stale_affected.update(self._clear_stale_props(node_id, params))
+            refreshing_affected.update(
+                self._clear_refreshing_props(
                     node_id,
                     params,
-                    now=now,
-                    request_generations=None
-                    if request_generations is None
-                    else _request_generations_for_node(request_generations, node_id),
-                    settled_generations=node_generations,
+                    request_generations=node_request_generations,
                 )
             )
         affected.update(self.motor.apply_authoritative_message(message, nodes, now=now))
-        return affected
+        return IntentObservationResult(
+            affected=affected,
+            stale_affected=stale_affected,
+            refreshing_affected=refreshing_affected,
+            decisions=tuple(decisions),
+        )
 
     def expire_pending(self, *, now: float) -> tuple[ExpiredIntent, ...]:
         expired: dict[str, tuple[str | int, set[str], dict[str, int]]] = {}
@@ -441,7 +580,7 @@ class CommandIntentRegistry:
                 continue
             current = expired.setdefault(key, (track.node_id, set(), {}))
             current[1].update({track.current_prop, track.target_prop})
-        return tuple(
+        result = tuple(
             ExpiredIntent(
                 node_id=node_id,
                 props=tuple(sorted(props)),
@@ -452,22 +591,46 @@ class CommandIntentRegistry:
             )
             for node_id, props, generations in expired.values()
         )
+        self._mark_refreshing(result)
+        return result
+
+    def resolve_expired_refresh(self, expired: Iterable[ExpiredIntent], *, failed: bool) -> set[str | int]:
+        del failed
+        return self._mark_stale_from_refreshing(expired)
 
     def is_latest_requested(self, node_id: str | int, prop: str, generation: int) -> bool:
         return self.properties.is_latest_requested(node_id, prop, generation)
 
     def project_visible(self, node: TopologyNode) -> TopologyNode:
         visible = self.properties.project_visible(node)
-        return self.motor.project_visible(visible)
+        visible = self.motor.project_visible(visible)
+        if _node_key(node.id) in self._stale_node_props:
+            return replace(visible, online=False)
+        return visible
 
     def clear_node(self, node_id: str | int) -> set[str | int]:
-        return self.properties.clear_node(node_id) | self.motor.clear_node(node_id)
+        return (
+            self.properties.clear_node(node_id)
+            | self.motor.clear_node(node_id)
+            | self._clear_stale_node(node_id)
+            | self._clear_refreshing_node(node_id)
+        )
 
     def clear_missing_nodes(self, node_ids: Iterable[str | int]) -> set[str | int]:
-        return self.properties.clear_missing_nodes(node_ids) | self.motor.clear_missing_nodes(node_ids)
+        return (
+            self.properties.clear_missing_nodes(node_ids)
+            | self.motor.clear_missing_nodes(node_ids)
+            | self._clear_missing_stale_nodes(node_ids)
+            | self._clear_missing_refreshing_nodes(node_ids)
+        )
 
     def clear_all(self) -> set[str | int]:
-        return self.properties.clear_all() | self.motor.clear_all()
+        affected = self.properties.clear_all() | self.motor.clear_all()
+        affected.update(node_id for node_id, _props in self._stale_node_props.values())
+        affected.update(node_id for node_id, _props in self._refreshing_expired_props.values())
+        self._stale_node_props.clear()
+        self._refreshing_expired_props.clear()
+        return affected
 
     def next_expiration(self, *, now: float) -> float | None:
         expirations = [
@@ -489,10 +652,171 @@ class CommandIntentRegistry:
             "count": len(property_entries),
             "properties": property_entries,
             "motor": self.motor.diagnostics(now=now),
+            "stale": [
+                {"node_id": str(node_id), "properties": sorted(props)}
+                for node_id, props in self._stale_node_props.values()
+            ],
+            "refreshing": [
+                {"node_id": str(node_id), "properties": sorted(props)}
+                for node_id, props in self._refreshing_expired_props.values()
+            ],
         }
 
     def signature(self) -> tuple[object, ...]:
-        return (self.properties.signature(), self.motor.signature())
+        return (self.properties.signature(), self.motor.signature(), self._stale_signature())
+
+    def stale_summary(self) -> dict[str, tuple[str, ...]]:
+        return {str(node_id): tuple(sorted(props)) for node_id, props in self._stale_node_props.values()}
+
+    def refreshing_summary(self) -> dict[str, tuple[str, ...]]:
+        return {str(node_id): tuple(sorted(props)) for node_id, props in self._refreshing_expired_props.values()}
+
+    def _mark_refreshing(self, expired: Iterable[ExpiredIntent]) -> set[str | int]:
+        affected: set[str | int] = set()
+        for item in expired:
+            node_key = _node_key(item.node_id)
+            if node_key is None:
+                continue
+            current = self._refreshing_expired_props.get(node_key)
+            if current is None:
+                current = (item.node_id, {})
+                self._refreshing_expired_props[node_key] = current
+            generations = item.generation_by_prop()
+            for prop in item.props:
+                current[1][prop] = generations.get(prop)
+            affected.add(item.node_id)
+        return affected
+
+    def _mark_stale_from_refreshing(self, expired: Iterable[ExpiredIntent]) -> set[str | int]:
+        affected: set[str | int] = set()
+        for item in expired:
+            node_key = _node_key(item.node_id)
+            if node_key is None:
+                continue
+            refreshing = self._refreshing_expired_props.get(node_key)
+            if refreshing is None:
+                continue
+            _refreshing_node_id, refreshing_props = refreshing
+            item_generations = item.generation_by_prop()
+            failed_props: set[str] = set()
+            failed_generations: dict[str, int | None] = {}
+            for prop in item.props:
+                generation = item_generations.get(prop)
+                if refreshing_props.get(prop) != generation:
+                    continue
+                refreshing_props.pop(prop, None)
+                if generation is None or self.is_latest_requested(item.node_id, prop, generation):
+                    failed_props.add(prop)
+                    failed_generations[prop] = generation
+            if not refreshing_props:
+                self._refreshing_expired_props.pop(node_key, None)
+            if not failed_props:
+                continue
+            stale = self._stale_node_props.get(node_key)
+            if stale is None:
+                stale = (item.node_id, {})
+                self._stale_node_props[node_key] = stale
+            for prop in failed_props:
+                stale[1][prop] = failed_generations.get(prop)
+            affected.add(item.node_id)
+        return affected
+
+    def _clear_stale_props(self, node_id: str | int, props: Iterable[str] | Mapping[str, Any]) -> set[str | int]:
+        node_key = _node_key(node_id)
+        if node_key is None:
+            return set()
+        current = self._stale_node_props.get(node_key)
+        if current is None:
+            return set()
+        stale_node_id, stale_props = current
+        before = len(stale_props)
+        for prop in props:
+            if isinstance(prop, str):
+                stale_props.pop(prop, None)
+        if stale_props:
+            return {stale_node_id} if len(stale_props) != before else set()
+        self._stale_node_props.pop(node_key, None)
+        return {stale_node_id}
+
+    def _stale_generations_for_props(
+        self,
+        node_id: str | int,
+        props: Iterable[str] | Mapping[str, Any],
+    ) -> dict[str, int | None]:
+        node_key = _node_key(node_id)
+        if node_key is None:
+            return {}
+        current = self._stale_node_props.get(node_key)
+        if current is None:
+            return {}
+        _stale_node_id, stale_props = current
+        return {prop: stale_props[prop] for prop in props if isinstance(prop, str) and prop in stale_props}
+
+    def _clear_refreshing_props(
+        self,
+        node_id: str | int,
+        props: Iterable[str] | Mapping[str, Any],
+        request_generations: Mapping[str, int] | None = None,
+    ) -> set[str | int]:
+        node_key = _node_key(node_id)
+        if node_key is None:
+            return set()
+        current = self._refreshing_expired_props.get(node_key)
+        if current is None:
+            return set()
+        refreshing_node_id, refreshing_props = current
+        before = len(refreshing_props)
+        for prop in props:
+            if not isinstance(prop, str):
+                continue
+            if request_generations is not None and request_generations.get(prop) != refreshing_props.get(prop):
+                continue
+            refreshing_props.pop(prop, None)
+        if refreshing_props:
+            return {refreshing_node_id} if len(refreshing_props) != before else set()
+        self._refreshing_expired_props.pop(node_key, None)
+        return {refreshing_node_id}
+
+    def _clear_stale_node(self, node_id: str | int) -> set[str | int]:
+        node_key = _node_key(node_id)
+        if node_key is None:
+            return set()
+        stale = self._stale_node_props.pop(node_key, None)
+        return set() if stale is None else {stale[0]}
+
+    def _clear_refreshing_node(self, node_id: str | int) -> set[str | int]:
+        node_key = _node_key(node_id)
+        if node_key is None:
+            return set()
+        refreshing = self._refreshing_expired_props.pop(node_key, None)
+        return set() if refreshing is None else {refreshing[0]}
+
+    def _clear_missing_stale_nodes(self, node_ids: Iterable[str | int]) -> set[str | int]:
+        known = {_node_key(node_id) for node_id in node_ids}
+        known.discard(None)
+        affected: set[str | int] = set()
+        for node_key, (node_id, _props) in list(self._stale_node_props.items()):
+            if node_key in known:
+                continue
+            self._stale_node_props.pop(node_key, None)
+            affected.add(node_id)
+        return affected
+
+    def _clear_missing_refreshing_nodes(self, node_ids: Iterable[str | int]) -> set[str | int]:
+        known = {_node_key(node_id) for node_id in node_ids}
+        known.discard(None)
+        affected: set[str | int] = set()
+        for node_key, (node_id, _props) in list(self._refreshing_expired_props.items()):
+            if node_key in known:
+                continue
+            self._refreshing_expired_props.pop(node_key, None)
+            affected.add(node_id)
+        return affected
+
+    def _stale_signature(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        return tuple(
+            sorted((node_key, tuple(sorted(props))) for node_key, (_node_id, props) in self._stale_node_props.items())
+        )
 
 
 def _item_id(item: Mapping[str, Any]) -> str | int | None:
@@ -518,6 +842,18 @@ def _request_generations_for_node(
         if _node_key(candidate_id) == node_key:
             return candidate
     return {}
+
+
+def _supports_progress(baseline: Any, observed: Any, target: Any) -> bool:
+    if isinstance(baseline, bool) or isinstance(observed, bool) or isinstance(target, bool):
+        return False
+    if not all(isinstance(value, int | float) for value in (baseline, observed, target)):
+        return False
+    if baseline == target:
+        return False
+    if target > baseline:
+        return baseline < observed < target
+    return target < observed < baseline
 
 
 def _trackable_property_props(props: Mapping[str, Any]) -> dict[str, Any]:

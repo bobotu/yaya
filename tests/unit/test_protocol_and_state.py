@@ -309,12 +309,12 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(state.nodes["light-1"].params["p"], False)
         self.assertTrue(registry.has_pending("light-1", ["p"]))
 
-        affected = registry.apply_authoritative_message(
+        result = registry.apply_authoritative_message(
             {"nodes": [{"id": "light-1", "params": {"p": True}}]},
             nodes=state.nodes,
             now=13.0,
         )
-        self.assertEqual(affected, {"light-1"})
+        self.assertEqual(result.affected, {"light-1"})
         self.assertFalse(registry.has_pending("light-1", ["p"]))
 
         registry.record_property_intents({"light-1": {"l": 20}}, nodes=state.nodes, now=20.0)
@@ -326,13 +326,22 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertTrue(registry.has_pending("light-1"))
         self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["l"], 20)
 
-        affected = registry.apply_authoritative_message(
+        result = registry.apply_authoritative_message(
             {"nodes": [{"id": "light-1", "params": {"l": 80}}]},
             nodes=state.nodes,
             now=25.1,
-            settled_generations={"light-1": {"l": 1}},
+            request_generations={"light-1": expired[0].generation_by_prop()},
         )
-        self.assertEqual(affected, {"light-1"})
+        self.assertEqual(result.affected, {"light-1"})
+        self.assertTrue(registry.has_pending("light-1"))
+        self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["l"], 20)
+
+        result = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"l": 20}}]},
+            nodes=state.nodes,
+            now=26.0,
+        )
+        self.assertEqual(result.affected, {"light-1"})
         self.assertFalse(registry.has_pending("light-1"))
 
     def test_command_intent_keeps_target_projection_when_authoritative_value_is_stale(self) -> None:
@@ -348,24 +357,91 @@ class ProtocolAndStateTests(unittest.TestCase):
         registry = CommandIntentRegistry(ttl=5.0)
 
         registry.record_property_intents({"light-1": {"p": False}}, nodes=state.nodes, now=10.0)
-        affected = registry.apply_authoritative_message(
+        result = registry.apply_authoritative_message(
             {"nodes": [{"id": "light-1", "params": {"p": True, "l": 40}}]},
             nodes=state.nodes,
             now=12.0,
         )
 
-        self.assertEqual(affected, set())
+        self.assertEqual(result.affected, set())
         self.assertFalse(registry.project_visible(state.nodes["light-1"]).params["p"])
         self.assertTrue(registry.has_pending("light-1", ["p"]))
 
-        affected = registry.apply_authoritative_message(
+        result = registry.apply_authoritative_message(
             {"nodes": [{"id": "light-1", "params": {"p": False}}]},
             nodes=state.nodes,
             now=13.0,
         )
 
-        self.assertEqual(affected, {"light-1"})
+        self.assertEqual(result.affected, {"light-1"})
         self.assertFalse(registry.has_pending("light-1", ["p"]))
+
+    def test_command_intent_refresh_progress_keeps_projection_and_retries(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True, "l": 1}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=5.0)
+
+        registry.record_property_intents({"light-1": {"l": 84}}, nodes=state.nodes, now=10.0)
+        expired = registry.expire_pending(now=15.0)
+
+        result = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"l": 43}}]},
+            nodes=state.nodes,
+            now=15.1,
+            request_generations={"light-1": expired[0].generation_by_prop()},
+        )
+
+        self.assertEqual(result.affected, {"light-1"})
+        self.assertEqual(result.decisions[0]["decision"], "support_progress")
+        self.assertTrue(registry.has_pending("light-1", ["l"]))
+        self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["l"], 84)
+        self.assertEqual(registry.resolve_expired_refresh(expired, failed=False), set())
+        self.assertEqual(registry.diagnostics(now=15.1)["stale"], [])
+
+        result = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"l": 84}}]},
+            nodes=state.nodes,
+            now=17.0,
+        )
+
+        self.assertEqual(result.affected, {"light-1"})
+        self.assertFalse(registry.has_pending("light-1", ["l"]))
+
+    def test_command_intent_refresh_weak_conflict_keeps_projection_without_stale(self) -> None:
+        state = GatewayState()
+        state.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
+        )
+        registry = CommandIntentRegistry(ttl=5.0)
+
+        registry.record_property_intents({"light-1": {"p": False}}, nodes=state.nodes, now=10.0)
+        expired = registry.expire_pending(now=15.0)
+
+        result = registry.apply_authoritative_message(
+            {"nodes": [{"id": "light-1", "params": {"p": True}}]},
+            nodes=state.nodes,
+            now=15.1,
+            request_generations={"light-1": expired[0].generation_by_prop()},
+        )
+
+        self.assertEqual(result.affected, {"light-1"})
+        self.assertEqual(result.decisions[0]["decision"], "weak_conflict")
+        self.assertTrue(registry.has_pending("light-1", ["p"]))
+        self.assertFalse(registry.project_visible(state.nodes["light-1"]).params["p"])
+        self.assertEqual(registry.resolve_expired_refresh(expired, failed=False), set())
+        self.assertEqual(registry.diagnostics(now=15.1)["stale"], [])
 
     def test_command_intent_records_noop_ack_to_guard_against_stale_push(self) -> None:
         state = GatewayState()
@@ -388,13 +464,13 @@ class ProtocolAndStateTests(unittest.TestCase):
             {"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": False}}]}
         )
         self.assertEqual(changes[0].after.params["p"], False)
-        affected = registry.apply_authoritative_message(
+        result = registry.apply_authoritative_message(
             {"nodes": [{"id": "light-1", "params": {"p": False}}]},
             nodes=state.nodes,
             now=11.0,
         )
 
-        self.assertEqual(affected, set())
+        self.assertEqual(result.affected, set())
         self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["p"], True)
         self.assertTrue(registry.has_pending("light-1", ["p"]))
 
@@ -443,14 +519,14 @@ class ProtocolAndStateTests(unittest.TestCase):
         second = registry.prepare_property_intents({"light-1": {"p": True}})
         registry.record_property_intents({"light-1": {"p": True}}, nodes=state.nodes, now=11.1, token=second)
 
-        affected = registry.apply_authoritative_message(
+        result = registry.apply_authoritative_message(
             {"nodes": [{"id": "light-1", "params": {"p": True}}]},
             nodes=state.nodes,
             now=11.2,
             request_generations={"light-1": expired[0].generation_by_prop()},
         )
 
-        self.assertEqual(affected, set())
+        self.assertEqual(result.affected, set())
         self.assertTrue(registry.has_pending("light-1", ["p"]))
 
     def test_property_intent_partial_push_does_not_clear_other_pending_props(self) -> None:
@@ -466,13 +542,13 @@ class ProtocolAndStateTests(unittest.TestCase):
         registry = CommandIntentRegistry(ttl=5.0)
 
         registry.record_property_intents({"light-1": {"p": True, "l": 80}}, nodes=state.nodes, now=10.0)
-        affected = registry.apply_authoritative_message(
+        result = registry.apply_authoritative_message(
             {"nodes": [{"id": "light-1", "params": {"p": True}}]},
             nodes=state.nodes,
             now=11.0,
         )
 
-        self.assertEqual(affected, {"light-1"})
+        self.assertEqual(result.affected, {"light-1"})
         self.assertFalse(registry.has_pending("light-1", ["p"]))
         self.assertTrue(registry.has_pending("light-1", ["l"]))
         self.assertEqual(registry.project_visible(state.nodes["light-1"]).params["l"], 80)
@@ -492,13 +568,13 @@ class ProtocolAndStateTests(unittest.TestCase):
         registry.record_property_intents({"switch-1": {"2-sp": False}}, nodes=state.nodes, now=10.0)
         self.assertFalse(registry.project_visible(state.nodes["switch-1"]).params["2-sp"])
 
-        affected = registry.apply_authoritative_message(
+        result = registry.apply_authoritative_message(
             {"nodes": [{"id": "switch-1", "params": {"2-sp": True}}]},
             nodes=state.nodes,
             now=12.0,
         )
 
-        self.assertEqual(affected, set())
+        self.assertEqual(result.affected, set())
         self.assertTrue(registry.has_pending("switch-1", ["2-sp"]))
         self.assertFalse(registry.project_visible(state.nodes["switch-1"]).params["2-sp"])
 
@@ -546,7 +622,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(tracker.record("light-1", {"p": True, 1: "bad"}, now=1.0), {"light-1"})
         self.assertTrue(tracker.has_pending("light-1", ["p"]))
         self.assertFalse(tracker.has_pending("light-1", ["1"]))
-        self.assertEqual(tracker.apply_authoritative_node(True, {"p": True}, now=2.0), set())
+        self.assertEqual(tracker.apply_authoritative_node(True, {"p": True}, now=2.0), (set(), ()))
         self.assertEqual(tracker.clear_node("light-1"), {"light-1"})
 
     def test_motor_tracking_uses_target_without_overwriting_current_position(self) -> None:

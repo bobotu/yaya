@@ -4,7 +4,6 @@ import asyncio
 import json
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -77,7 +76,6 @@ class FakeGateway:
         self.refreshed_node_ids: list[str | int] = []
         self.sync_kwargs: list[dict[str, Any]] = []
         self._intents = CommandIntentRegistry()
-        self._stale_node_props: dict[str, tuple[str | int, dict[str, int | None]]] = {}
         self._event_listeners = []
         self._property_listeners = []
         self._session_listeners = []
@@ -115,7 +113,6 @@ class FakeGateway:
     async def sync(self, **kwargs: Any) -> None:
         self.sync_kwargs.append(kwargs)
         self._intents.clear_all()
-        self._stale_node_props.clear()
         self.state.apply_topology(self.fixture)
         self.last_full_sync_source = "poll"
         previous = self.session_state
@@ -235,18 +232,6 @@ class FakeGateway:
         self._notify_state({"method": "gateway_post.prop"})
 
     def refresh_node_params(self, node_id: str | int, params: dict[str, Any]) -> None:
-        node_key = str(node_id)
-        stale = self._stale_node_props.pop(node_key, None)
-        settled_generations = None
-        if stale is not None:
-            _stale_node_id, stale_props = stale
-            settled_generations = {
-                node_key: {
-                    prop: generation
-                    for prop, generation in stale_props.items()
-                    if prop in params and generation is not None
-                }
-            }
         self.state.apply_properties(
             {
                 "method": "gateway_get.node",
@@ -263,7 +248,6 @@ class FakeGateway:
             {"nodes": [{"id": node_id, "params": params}]},
             nodes=self.state.nodes,
             now=asyncio.get_running_loop().time(),
-            settled_generations=settled_generations,
         )
         self._notify_state({"method": "gateway_get.node"})
 
@@ -272,15 +256,12 @@ class FakeGateway:
         if not expired:
             return
         for item in expired:
-            self._stale_node_props[str(item.node_id)] = (item.node_id, item.generation_by_prop())
             self.refreshed_node_ids.append(item.node_id)
+        self._intents.resolve_expired_refresh(expired, failed=True)
         self._notify_state({"method": "gateway_intent.expired"})
 
     def _project_visible(self, node: Any) -> Any:
-        visible = self._intents.project_visible(node)
-        if str(node.id) in self._stale_node_props:
-            return replace(visible, online=False)
-        return visible
+        return self._intents.project_visible(node)
 
     def _notify_state(self, message: dict[str, Any]) -> None:
         event = StateSnapshotChanged(reason=_state_reason(message), message=message)
@@ -308,10 +289,6 @@ class FakeGateway:
         self.fixture = fixture
         self.state.apply_topology(fixture)
         self._intents.clear_missing_nodes(self.state.topology_node_ids)
-        active_node_ids = {str(node_id) for node_id in self.state.topology_node_ids}
-        for node_id in list(self._stale_node_props):
-            if node_id not in active_node_ids:
-                self._stale_node_props.pop(node_id, None)
         for listener in list(self._state_listeners):
             listener(
                 StateSnapshotChanged(
