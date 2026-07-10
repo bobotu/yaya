@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Iterable, Mapping
+from collections.abc import Awaitable, Mapping
 from typing import Any, TypeVar
 
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -61,14 +61,6 @@ class YeelightProEntity(CoordinatorEntity[YeelightProCoordinator]):
             "device_type": node.type,
             "property_type": node.property_type,
         }
-
-    @property
-    def assumed_state(self) -> bool:
-        return self.coordinator.gateway.has_pending_intent(self._node_id, self.intent_properties)
-
-    @property
-    def intent_properties(self) -> Iterable[str] | None:
-        return ()
 
     def require_current_node(self) -> TopologyNode:
         return require_node_for_action(self.node, self._node_id)

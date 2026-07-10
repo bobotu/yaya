@@ -99,10 +99,6 @@ class YeelightProAirConditionClimate(YeelightProEntity, ClimateEntity):
             self._attr_translation_placeholders = {"index": str(index)}
 
     @property
-    def intent_properties(self) -> tuple[str, ...]:
-        return (self._key("acp"), self._key("acm"), self._key("actt"), self._key("acf"))
-
-    @property
     def current_temperature(self) -> float | None:
         value = int_param(self.node, self._key("acct"))
         return None if value is None else float(value)
@@ -173,10 +169,6 @@ class YeelightProBathHeaterClimate(YeelightProEntity, ClimateEntity):
     def __init__(self, coordinator: YeelightProCoordinator, node: Any) -> None:
         super().__init__(coordinator, node, "bath_heater_climate")
         self._attr_translation_key = "bath_heater_climate"
-
-    @property
-    def intent_properties(self) -> tuple[str, ...]:
-        return ("p", "tgt")
 
     @property
     def current_temperature(self) -> float | None:

@@ -58,10 +58,6 @@ class YeelightProLight(YeelightProEntity, LightEntity):
         self._attr_supported_features = LightEntityFeature.TRANSITION | LightEntityFeature.FLASH
 
     @property
-    def intent_properties(self) -> tuple[str, ...]:
-        return ("p", "l", "ct", "c")
-
-    @property
     def supported_color_modes(self) -> set[ColorMode]:
         node = self.node
         if node is None:

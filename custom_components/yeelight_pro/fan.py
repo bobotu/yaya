@@ -57,10 +57,6 @@ class YeelightProBathHeaterFan(YeelightProEntity, FanEntity):
         self._attr_translation_key = translation_key
 
     @property
-    def intent_properties(self) -> tuple[str, ...]:
-        return (self._prop,)
-
-    @property
     def is_on(self) -> bool | None:
         level = _level(self.node, self._prop)
         return None if level is None else level > 0
