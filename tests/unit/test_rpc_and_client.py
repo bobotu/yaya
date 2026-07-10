@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import types
 import unittest
 from pathlib import Path
 from typing import Any
@@ -16,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"
 
 from yeelight_pro.core import (  # noqa: E402
     ConnectionClosed,
-    NodeCommand,
     NodeSet,
     ProtocolError,
     ProtocolFrameTooLarge,
@@ -25,18 +23,10 @@ from yeelight_pro.core import (  # noqa: E402
 )
 from yeelight_pro.session import (
     GatewayRPC,  # noqa: E402
-    GatewaySessionState,  # noqa: E402
     YeelightProGateway,  # noqa: E402
 )
-from yeelight_pro.session.actors import ActorClosed  # noqa: E402
-from yeelight_pro.session.gateway import _SetPropBatcher  # noqa: E402
-from yeelight_pro.session.messages import (  # noqa: E402
-    ApplyTopologyCommand,
-    FullPropertySyncTimedOutEvent,
-    RpcPushEvent,
-    SetSessionStateCommand,
-)
-from yeelight_pro.session.model import MOTOR_TRACKING_TARGET_POSITION  # noqa: E402
+from yeelight_pro.session.connection import RpcPushEvent  # noqa: E402
+from yeelight_pro.session.motor import MOTOR_TRACKING_TARGET_POSITION  # noqa: E402
 
 
 class RpcClientTests(unittest.IsolatedAsyncioTestCase):
@@ -83,13 +73,13 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         try:
             await gateway.connect()
             response = await gateway.get_topology()
-            gateway.state.apply_topology(response)
+            gateway._session.store.apply_topology(response)
             await asyncio.sleep(0)
         finally:
             await gateway.close()
 
         self.assertEqual(response["id"], 1)
-        self.assertEqual(gateway.state.nodes["light-1"].params["p"], True)
+        self.assertEqual(gateway.visible_node("light-1").params["p"], True)  # type: ignore[union-attr]
 
     async def test_property_listener_receives_before_and_after_snapshots(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -108,7 +98,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         changes: list[Any] = []
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
                     "groups": [],
@@ -151,8 +141,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await gateway.close()
 
         self.assertEqual(messages[0].message["method"], "gateway_post.topology")
-        self.assertEqual(gateway.state.nodes["new-light"].type, 3)
-        self.assertEqual(gateway.state.nodes["new-light"].params["p"], True)
+        self.assertEqual(gateway.visible_node("new-light").type, 3)  # type: ignore[union-attr]
+        self.assertEqual(gateway.visible_node("new-light").params["p"], True)  # type: ignore[union-attr]
 
     async def test_send_node_command_uses_gateway_payload(self) -> None:
         received: list[dict[str, Any]] = []
@@ -200,7 +190,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [
                         {"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}},
@@ -213,8 +203,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             )
             await gateway.connect()
             first, second = await asyncio.gather(
-                gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True}),
-                gateway.set_node_props("light-2", {"p": False}, intent_props={"p": False}),
+                gateway.set_node_props("light-1", {"p": True}),
+                gateway.set_node_props("light-2", {"p": False}),
             )
         finally:
             await gateway.close()
@@ -249,7 +239,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False, "l": 80}}],
                     "groups": [],
@@ -259,8 +249,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             )
             await gateway.connect()
             await asyncio.gather(
-                gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True}),
-                gateway.set_node_props("light-1", {"l": 42}, intent_props={"l": 42}),
+                gateway.set_node_props("light-1", {"p": True}),
+                gateway.set_node_props("light-1", {"l": 42}),
             )
         finally:
             await gateway.close()
@@ -290,7 +280,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
                     "groups": [],
@@ -300,8 +290,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             )
             await gateway.connect()
             await asyncio.gather(
-                gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True}),
-                gateway.set_node_props("light-1", {"p": False}, intent_props={"p": False}),
+                gateway.set_node_props("light-1", {"p": True}),
+                gateway.set_node_props("light-1", {"p": False}),
             )
         finally:
             await gateway.close()
@@ -331,8 +321,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         try:
             await gateway.connect()
             results = await asyncio.gather(
-                gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True}),
-                gateway.set_node_props("light-2", {"p": False}, intent_props={"p": False}),
+                gateway.set_node_props("light-1", {"p": True}),
+                gateway.set_node_props("light-2", {"p": False}),
                 return_exceptions=True,
             )
         finally:
@@ -382,7 +372,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 20, "tp": 20}}],
                     "groups": [],
@@ -392,7 +382,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             )
             await gateway.connect()
             await gateway.set_curtain_position("curtain-1", 80)
-            self.assertEqual(gateway.state.nodes["curtain-1"].params["cp"], 20)
+            self.assertEqual(gateway.visible_node("curtain-1").params["cp"], 20)  # type: ignore[union-attr]
             self.assertEqual(gateway.visible_node("curtain-1").params["cp"], 20)
             self.assertEqual(gateway.visible_node("curtain-1").params[MOTOR_TRACKING_TARGET_POSITION], 80)
         finally:
@@ -425,531 +415,63 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             await rpc.connect()
-            with self.assertLogs("yeelight_pro.session.transport.rpc", level="ERROR"):
+            with self.assertLogs("yeelight_pro.session.rpc", level="ERROR"):
                 response = await rpc.request("gateway_get.topology", on_written=broken_callback)
         finally:
             await rpc.close()
 
         self.assertEqual(response["result"], "ok")
 
-    async def test_set_node_props_projects_intent_state_until_push_confirms(self) -> None:
-        received: list[dict[str, Any]] = []
+    async def test_set_node_props_holds_observed_state_until_target_push(self) -> None:
+        allow_target = asyncio.Event()
 
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
                 request = parse_line(await reader.readline())
-                received.append(request)
-                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8"))
+                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode())
                 writer.write(b"\r\n")
                 await writer.drain()
-                await asyncio.sleep(0.05)
                 writer.write(
                     b'{"method":"gateway_post.prop","nodes":[{"id":"light-1","nt":2,"params":{"p":true}}]}\r\n'
                 )
                 await writer.drain()
-                await asyncio.sleep(0.05)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port)
-        messages: list[Any] = []
-
-        try:
-            gateway.state.apply_topology(
-                {
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                }
-            )
-            gateway.add_state_listener(messages.append)
-            await gateway.connect()
-            await gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True})
-            self.assertEqual(gateway.state.nodes["light-1"].params["p"], False)
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
-            await asyncio.sleep(0.1)
-        finally:
-            await gateway.close()
-
-        self.assertEqual([request["method"] for request in received], ["gateway_set.prop"])
-        self.assertEqual(gateway.state.nodes["light-1"].params["p"], True)
-        self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-        self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
-        self.assertIn("gateway_intent.recorded", [message.message["method"] for message in messages])
-
-    async def test_set_node_props_does_not_project_intent_state_before_write_ack(self) -> None:
-        received: list[dict[str, Any]] = []
-        request_received = asyncio.Event()
-        allow_response = asyncio.Event()
-
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                request = parse_line(await reader.readline())
-                received.append(request)
-                request_received.set()
-                await allow_response.wait()
-                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8"))
-                writer.write(b"\r\n")
-                await writer.drain()
-                await asyncio.sleep(0.05)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port)
-
-        try:
-            await gateway._state_ref.ask(
-                ApplyTopologyCommand(
-                    payload={
-                        "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
-                        "groups": [],
-                        "rooms": [],
-                        "scenes": [],
-                    },
-                    reason="topology sync",
-                    message={"method": "gateway_sync.topology"},
-                )
-            )
-            await gateway.connect()
-            command = asyncio.create_task(gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True}))
-            await asyncio.wait_for(request_received.wait(), timeout=0.5)
-            await asyncio.sleep(0)
-            self.assertEqual(gateway.visible_node("light-1").params["p"], False)
-            self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
-
-            allow_response.set()
-            await command
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
-        finally:
-            await gateway.close()
-
-        self.assertEqual([request["method"] for request in received], ["gateway_set.prop"])
-
-    async def test_superseded_ack_does_not_install_old_intent_target(self) -> None:
-        received: list[dict[str, Any]] = []
-        first_received = asyncio.Event()
-        second_received = asyncio.Event()
-        allow_first_response = asyncio.Event()
-        allow_second_response = asyncio.Event()
-
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                first_request = parse_line(await reader.readline())
-                received.append(first_request)
-                first_received.set()
-                await allow_first_response.wait()
+                await allow_target.wait()
                 writer.write(
-                    json.dumps({"id": first_request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8")
-                    + b"\r\n"
+                    b'{"method":"gateway_post.prop","nodes":[{"id":"light-1","nt":2,"params":{"p":false}}]}\r\n'
                 )
                 await writer.drain()
-
-                second_request = parse_line(await reader.readline())
-                received.append(second_request)
-                second_received.set()
-                await allow_second_response.wait()
-                writer.write(
-                    json.dumps({"id": second_request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8")
-                    + b"\r\n"
-                )
-                await writer.drain()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.02)
             finally:
                 writer.close()
                 await writer.wait_closed()
 
         host, port = await self.start_gateway(handler)
         gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0)
-
-        try:
-            await gateway._state_ref.ask(
-                ApplyTopologyCommand(
-                    payload={
-                        "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True}}],
-                        "groups": [],
-                        "rooms": [],
-                        "scenes": [],
-                    },
-                    reason="topology sync",
-                    message={"method": "gateway_sync.topology"},
-                )
-            )
-            await gateway.connect()
-            first = asyncio.create_task(gateway.set_node_props("light-1", {"p": False}, intent_props={"p": False}))
-            await asyncio.wait_for(first_received.wait(), timeout=0.5)
-            second = asyncio.create_task(gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True}))
-            await asyncio.sleep(0.05)
-
-            allow_first_response.set()
-            await asyncio.wait_for(first, timeout=0.5)
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
-
-            await asyncio.wait_for(second_received.wait(), timeout=0.5)
-            allow_second_response.set()
-            await asyncio.wait_for(second, timeout=0.5)
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
-        finally:
-            await gateway.close()
-
-        self.assertEqual([request["method"] for request in received], ["gateway_set.prop", "gateway_set.prop"])
-
-    async def test_set_node_props_rejects_missing_write_ack_without_intent_state(self) -> None:
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                request = parse_line(await reader.readline())
-                writer.write(
-                    json.dumps({"id": request["id"], "result": "accepted"}, separators=(",", ":")).encode("utf-8")
-                )
-                writer.write(b"\r\n")
-                await writer.drain()
-                await asyncio.sleep(0.05)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port)
-
-        try:
-            await gateway._state_ref.ask(
-                ApplyTopologyCommand(
-                    payload={
-                        "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
-                        "groups": [],
-                        "rooms": [],
-                        "scenes": [],
-                    },
-                    reason="topology sync",
-                    message={"method": "gateway_sync.topology"},
-                )
-            )
-            await gateway.connect()
-            with self.assertRaises(ProtocolError):
-                await gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True})
-            self.assertEqual(gateway.visible_node("light-1").params["p"], False)
-            self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
-        finally:
-            await gateway.close()
-
-    async def test_command_intent_expiry_refreshes_target_node(self) -> None:
-        received: list[dict[str, Any]] = []
-
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                set_request = parse_line(await reader.readline())
-                received.append(set_request)
-                writer.write(
-                    json.dumps({"id": set_request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8")
-                    + b"\r\n"
-                )
-                await writer.drain()
-
-                refresh_request = parse_line(await reader.readline())
-                received.append(refresh_request)
-                writer.write(
-                    json.dumps(
-                        {
-                            "id": refresh_request["id"],
-                            "nodes": [{"id": "light-1", "nt": 2, "params": {"p": False}}],
-                        },
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    + b"\r\n"
-                )
-                await writer.drain()
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port, command_intent_ttl=0.02)
-
-        try:
-            gateway.state.apply_topology(
-                {
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                }
-            )
-            await gateway.connect()
-            await gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True})
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            await asyncio.sleep(0.1)
-        finally:
-            await gateway.close()
-
-        self.assertEqual(
-            [request["method"] for request in received],
-            ["gateway_set.prop", "gateway_get.node"],
-        )
-        self.assertEqual(gateway.state.nodes["light-1"].params["p"], False)
-        self.assertEqual(gateway.visible_node("light-1").params["p"], False)
-        self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
-
-    async def test_command_intent_expiry_refreshes_mesh_group_node_via_group_api(self) -> None:
-        received: list[dict[str, Any]] = []
-
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                set_request = parse_line(await reader.readline())
-                received.append(set_request)
-                writer.write(
-                    json.dumps({"id": set_request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8")
-                    + b"\r\n"
-                )
-                await writer.drain()
-
-                refresh_request = parse_line(await reader.readline())
-                received.append(refresh_request)
-                writer.write(
-                    json.dumps(
-                        {
-                            "id": refresh_request["id"],
-                            "groups": [{"id": 265461, "nt": 4, "params": {"p": False, "l": 30}}],
-                        },
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    + b"\r\n"
-                )
-                await writer.drain()
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port, command_intent_ttl=0.02)
-
-        try:
-            gateway.state.apply_topology(
-                {
-                    "nodes": [{"id": 265461, "nt": 4, "type": 3, "params": {"p": False, "l": 20}}],
-                    "groups": [{"id": 265461, "nt": 4, "params": {"p": False, "l": 20}}],
-                    "rooms": [],
-                    "scenes": [],
-                }
-            )
-            await gateway.connect()
-            await gateway.set_node_props(265461, {"p": True}, nt=4, intent_props={"p": True})
-            self.assertEqual(gateway.visible_node(265461).params["p"], True)
-            await asyncio.sleep(0.1)
-        finally:
-            await gateway.close()
-
-        self.assertEqual(
-            [request["method"] for request in received],
-            ["gateway_set.prop", "gateway_get.group"],
-        )
-        self.assertEqual(received[1]["params"], {"id": 265461})
-        self.assertEqual(gateway.state.nodes[265461].params["p"], False)
-        self.assertEqual(gateway.state.nodes[265461].params["l"], 30)
-        self.assertEqual(gateway.visible_node(265461).params["p"], False)
-        self.assertIsNot(gateway.visible_node(265461).online, False)
-        self.assertFalse(gateway.has_pending_intent(265461, ["p"]))
-
-    async def test_transition_duration_does_not_extend_intent_confirmation_window(self) -> None:
-        received: list[dict[str, Any]] = []
-
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                set_request = parse_line(await reader.readline())
-                received.append(set_request)
-                writer.write(
-                    json.dumps({"id": set_request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8")
-                    + b"\r\n"
-                )
-                await writer.drain()
-
-                refresh_request = parse_line(await reader.readline())
-                received.append(refresh_request)
-                writer.write(
-                    json.dumps(
-                        {
-                            "id": refresh_request["id"],
-                            "nodes": [{"id": "light-1", "nt": 2, "params": {"p": True}}],
-                        },
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                    + b"\r\n"
-                )
-                await writer.drain()
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port, command_intent_ttl=0.02)
-
-        try:
-            gateway.state.apply_topology(
-                {
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                }
-            )
-            await gateway.connect()
-            await gateway.set_node_props("light-1", {"p": False}, duration=100, intent_props={"p": False})
-            self.assertEqual(gateway.visible_node("light-1").params["p"], False)
-            await asyncio.sleep(0.06)
-        finally:
-            await gateway.close()
-
-        self.assertEqual(
-            [request["method"] for request in received],
-            ["gateway_set.prop", "gateway_get.node"],
+        gateway._session.store.apply_topology(
+            {
+                "nodes": [{"id": "light-1", "nt": 2, "type": 3, "o": True, "params": {"p": True}}],
+                "groups": [],
+                "rooms": [],
+                "scenes": [],
+            }
         )
 
-    async def test_latest_intent_write_supersedes_previous_pending_value(self) -> None:
-        received: list[dict[str, Any]] = []
-
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                for _ in range(2):
-                    request = parse_line(await reader.readline())
-                    received.append(request)
-                    writer.write(
-                        json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8")
-                        + b"\r\n"
-                    )
-                    await writer.drain()
-                await asyncio.sleep(0.05)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port)
-
         try:
-            gateway.state.apply_topology(
-                {
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                }
-            )
             await gateway.connect()
-            await gateway.set_node_props("light-1", {"p": False}, intent_props={"p": False})
-            self.assertEqual(gateway.visible_node("light-1").params["p"], False)
-            await gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True})
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
+            await gateway.set_node_props("light-1", {"p": False})
+            await asyncio.sleep(0.02)
+
+            self.assertTrue(gateway.visible_node("light-1").params["p"])
+            self.assertTrue(gateway.has_pending_write("light-1", ["p"]))
+
+            allow_target.set()
+            await asyncio.sleep(0.04)
+
+            self.assertFalse(gateway.visible_node("light-1").params["p"])
+            self.assertFalse(gateway.has_pending_write("light-1"))
         finally:
+            allow_target.set()
             await gateway.close()
-
-        self.assertEqual([request["method"] for request in received], ["gateway_set.prop", "gateway_set.prop"])
-
-    async def test_mismatched_push_does_not_overwrite_unconfirmed_intent(self) -> None:
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                request = parse_line(await reader.readline())
-                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8"))
-                writer.write(b"\r\n")
-                await writer.drain()
-                await asyncio.sleep(0.01)
-                writer.write(
-                    b'{"method":"gateway_post.prop","nodes":[{"id":"light-1","nt":2,"params":{"p":false}}]}\r\n'
-                )
-                await writer.drain()
-                await asyncio.sleep(0.05)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port, command_intent_ttl=0.2)
-
-        try:
-            gateway.state.apply_topology(
-                {
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                }
-            )
-            await gateway.connect()
-            await gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True})
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            await asyncio.sleep(0.05)
-            self.assertEqual(gateway.state.nodes["light-1"].params["p"], False)
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
-        finally:
-            await gateway.close()
-
-    async def test_topology_push_keeps_missing_node_intent(self) -> None:
-        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                request = parse_line(await reader.readline())
-                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode("utf-8"))
-                writer.write(b"\r\n")
-                await writer.drain()
-                await asyncio.sleep(0.02)
-                writer.write(b'{"method":"gateway_post.topology","nodes":[],"groups":[],"rooms":[],"scenes":[]}\r\n')
-                await writer.drain()
-                await asyncio.sleep(0.05)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        host, port = await self.start_gateway(handler)
-        gateway = YeelightProGateway(host, port=port)
-
-        try:
-            gateway.state.apply_topology(
-                {
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                }
-            )
-            await gateway.connect()
-            await gateway.set_node_props("light-1", {"p": True}, intent_props={"p": True})
-            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
-            await asyncio.sleep(0.1)
-            self.assertIn("light-1", gateway.state.nodes)
-            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
-            self.assertEqual(gateway.visible_node("light-1").params["p"], True)
-        finally:
-            await gateway.close()
-
-    async def test_connection_loss_clears_pending_intent(self) -> None:
-        gateway = YeelightProGateway("127.0.0.1", port=1)
-
-        try:
-            gateway.state.apply_topology(
-                {
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "name": "Light", "params": {"p": False}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                }
-            )
-            await gateway._record_command_intents({"light-1": {"p": True}})
-            self.assertTrue(gateway.has_pending_intent("light-1", ["p"]))
-            await gateway._session_ref.ask(
-                SetSessionStateCommand(GatewaySessionState.DISCONNECTED, ConnectionClosed("closed"))
-            )
-            await asyncio.sleep(0)
-        finally:
-            await gateway.close()
-
-        self.assertFalse(gateway.has_pending_intent("light-1", ["p"]))
 
     async def test_scene_and_event_methods_are_explicit_payloads(self) -> None:
         received: list[dict[str, Any]] = []
@@ -1047,8 +569,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.close()
 
-        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
-        self.assertTrue(gateway.state.nodes["light-1"].online)
+        self.assertEqual(gateway.visible_node("light-1").params, {"p": True})  # type: ignore[union-attr]
+        self.assertTrue(gateway.visible_node("light-1").online)  # type: ignore[union-attr]
         self.assertIsNotNone(gateway.last_full_sync_at)
 
     async def test_sync_falls_back_to_poll_when_full_property_push_is_missing(self) -> None:
@@ -1102,7 +624,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([request["method"] for request in received], ["gateway_get.topology", "gateway_get.node"])
         self.assertEqual(received[1]["params"], {"id": 0})
-        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
+        self.assertEqual(gateway.visible_node("light-1").params, {"p": True})  # type: ignore[union-attr]
         self.assertEqual(gateway.last_full_sync_source, "poll")
 
     async def test_topology_push_full_property_wait_falls_back_to_poll(self) -> None:
@@ -1147,51 +669,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([request["method"] for request in received], ["gateway_get.node"])
         self.assertEqual(received[0]["params"], {"id": 0})
-        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
+        self.assertEqual(gateway.visible_node("light-1").params, {"p": True})  # type: ignore[union-attr]
         self.assertEqual(gateway.last_full_sync_source, "poll")
-
-    async def test_repeated_topology_push_replaces_active_full_property_wait_options(self) -> None:
-        gateway = YeelightProGateway("127.0.0.1", port=1)
-        gateway.full_prop_timeout = 10.0
-
-        try:
-            await gateway._session_ref.ask(
-                RpcPushEvent(
-                    epoch=0,
-                    message={
-                        "method": "gateway_post.topology",
-                        "nodes": [{"id": "first-light", "nt": 2, "type": 3, "name": "First"}],
-                        "groups": [],
-                        "rooms": [],
-                        "scenes": [],
-                    },
-                )
-            )
-            first_sync_id = gateway._session._sync_id
-
-            await gateway._session_ref.ask(
-                RpcPushEvent(
-                    epoch=0,
-                    message={
-                        "method": "gateway_post.topology",
-                        "nodes": [{"id": "second-light", "nt": 2, "type": 3, "name": "Second"}],
-                        "groups": [],
-                        "rooms": [],
-                        "scenes": [],
-                    },
-                )
-            )
-            active_sync_id = gateway._session._sync_id
-            self.assertGreater(active_sync_id, first_sync_id)
-            self.assertEqual(set(gateway._session._sync_options_by_id), {active_sync_id})
-
-            await gateway._session_ref.ask(FullPropertySyncTimedOutEvent(sync_id=first_sync_id))
-            self.assertEqual(gateway.session_state, GatewaySessionState.WAITING_FULL_PROP)
-            self.assertEqual(gateway._session._sync_id, active_sync_id)
-            self.assertEqual(set(gateway._session._sync_options_by_id), {active_sync_id})
-            self.assertIsNone(gateway.last_full_sync_source)
-        finally:
-            await gateway.close()
 
     async def test_concurrent_sync_requests_join_current_sync(self) -> None:
         received: list[dict[str, Any]] = []
@@ -1274,7 +753,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
                     "groups": [],
@@ -1283,7 +762,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             await gateway.connect()
-            await gateway._session_ref.tell(
+            await gateway._session.ref.tell(
                 RpcPushEvent(
                     epoch=0,
                     message={"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": True}}]},
@@ -1293,7 +772,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.close()
 
-        self.assertEqual(gateway.state.nodes["light-1"].params["p"], False)
+        self.assertEqual(gateway.visible_node("light-1").params["p"], False)  # type: ignore[union-attr]
 
     async def test_start_runs_connection_supervision_and_initial_sync(self) -> None:
         statuses: list[Any] = []
@@ -1332,7 +811,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.close()
 
-        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
+        self.assertEqual(gateway.visible_node("light-1").params, {"p": True})  # type: ignore[union-attr]
         self.assertEqual(gateway.session_state, "disconnected")
         self.assertIn("ready", [getattr(status, "current", None) for status in statuses])
 
@@ -1477,71 +956,6 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(response["blob"]), 70 * 1024)
 
-    async def test_set_prop_batcher_rejects_submit_during_close_without_hanging(self) -> None:
-        class FakeGateway:
-            async def _send_node_command_batch(self, _requests: Any) -> dict[str, Any]:
-                return {"result": "ok"}
-
-        batcher = _SetPropBatcher(FakeGateway(), delay=0.05)
-        drain_started = asyncio.Event()
-        original_drain = batcher._drain
-
-        async def slow_drain(self: Any) -> None:
-            await original_drain()
-            drain_started.set()
-            await asyncio.sleep(0.02)
-
-        batcher._drain = types.MethodType(slow_drain, batcher)
-        close_task = asyncio.create_task(batcher.close())
-        await drain_started.wait()
-
-        command = (NodeCommand(id="light-1", nt=2, props={"p": True}),)
-        with self.assertRaises(ActorClosed):
-            await asyncio.wait_for(batcher.submit(command, {"light-1": {"p": True}}), timeout=0.2)
-        await asyncio.wait_for(close_task, timeout=0.2)
-        self.assertEqual(batcher._pending, [])
-
-    async def test_set_prop_batcher_close_drains_pending_futures(self) -> None:
-        class FakeGateway:
-            def __init__(self) -> None:
-                self.requests: list[Any] = []
-                self.send_started = asyncio.Event()
-                self.allow_response = asyncio.Event()
-
-            async def _send_node_command_batch(self, requests: Any) -> dict[str, Any]:
-                self.requests.append(requests)
-                self.send_started.set()
-                await self.allow_response.wait()
-                return {"result": "ok"}
-
-        fake_gateway = FakeGateway()
-        batcher = _SetPropBatcher(fake_gateway, delay=60)
-        first_command = (NodeCommand(id="light-1", nt=2, props={"p": True}),)
-        second_command = (NodeCommand(id="light-2", nt=2, props={"p": False}),)
-        first_task = asyncio.create_task(batcher.submit(first_command, {"light-1": {"p": True}}))
-        second_task = asyncio.create_task(batcher.submit(second_command, {"light-2": {"p": False}}))
-
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if len(batcher._pending) == 2:
-                break
-        self.assertEqual(len(batcher._pending), 2)
-
-        close_task = asyncio.create_task(batcher.close())
-        await asyncio.wait_for(fake_gateway.send_started.wait(), timeout=0.2)
-        self.assertFalse(first_task.done())
-        self.assertFalse(second_task.done())
-
-        fake_gateway.allow_response.set()
-        first, second = await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=0.2)
-        await asyncio.wait_for(close_task, timeout=0.2)
-
-        self.assertEqual(first, {"result": "ok"})
-        self.assertEqual(second, {"result": "ok"})
-        self.assertEqual(len(fake_gateway.requests), 1)
-        self.assertEqual(len(fake_gateway.requests[0]), 2)
-        self.assertEqual(batcher._pending, [])
-
     async def test_invalid_json_response_closes_connection_and_fails_pending_request(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
@@ -1622,7 +1036,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         try:
             rpc.add_push_listener(broken_listener)
             rpc.add_push_listener(messages.append)
-            with self.assertLogs("yeelight_pro.session.transport.rpc", level="ERROR"):
+            with self.assertLogs("yeelight_pro.session.rpc", level="ERROR"):
                 await rpc.connect()
                 await asyncio.sleep(0.1)
         finally:
@@ -1718,7 +1132,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError("unreachable")
 
         rpc = GatewayRPC("192.0.2.1", port=65443, request_timeout=0.01)
-        with patch("yeelight_pro.session.transport.rpc.asyncio.open_connection", side_effect=stalled_open_connection):
+        with patch("yeelight_pro.session.rpc.asyncio.open_connection", side_effect=stalled_open_connection):
             with self.assertRaises(RequestTimeout) as ctx:
                 await rpc.connect()
 

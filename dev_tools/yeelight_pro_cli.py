@@ -151,7 +151,7 @@ async def _cmd_list(args: argparse.Namespace) -> int:
         await gateway.sync(include_groups=not args.raw_devices_only, include_rooms=True)
         rows = [
             _node_summary(node, gateway)
-            for node in gateway.state.nodes.values()
+            for node in gateway.visible_nodes()
             if _should_list_node(node, raw_devices_only=args.raw_devices_only)
         ]
 
@@ -166,9 +166,9 @@ async def _cmd_describe(args: argparse.Namespace) -> int:
     async with YeelightProGateway(args.host, port=args.port, request_timeout=args.timeout) as gateway:
         await gateway.sync(include_groups=True, include_rooms=True)
         node_id = _lookup_node_id(gateway, args.id)
-        if node_id in gateway.state.nodes:
-            await gateway.refresh_node(node_id)
-        node = gateway.state.nodes.get(node_id)
+        if gateway.visible_node(node_id) is not None:
+            await gateway.readback_node(node_id)
+        node = gateway.visible_node(node_id)
         if node is None:
             raise SystemExit(f"device not found: {args.id}")
         summary = _node_detail(node, gateway)
@@ -353,12 +353,12 @@ async def _send_device_command(device: Any, args: argparse.Namespace) -> dict[st
 
 def _node_summary(node: TopologyNode, gateway: YeelightProGateway | None = None) -> dict[str, Any]:
     capabilities = capabilities_for_node(node)
-    room_id = gateway.state.room_id_for_node(node) if gateway is not None else node.room_id
+    room_id = gateway.room_id_for_node(node) if gateway is not None else node.room_id
     return {
         "id": node.id,
         "name": node.name,
         "room_id": room_id,
-        "room": gateway.state.room_name(room_id) if gateway is not None else None,
+        "room": gateway.room_name(room_id) if gateway is not None else None,
         "type": node.type,
         "pt": node.property_type,
         "nt": node.nt,
@@ -371,7 +371,7 @@ def _node_summary(node: TopologyNode, gateway: YeelightProGateway | None = None)
 
 def _print_property_change(change: PropertyChange, gateway: YeelightProGateway) -> None:
     node = change.after
-    room_id = gateway.state.room_id_for_node(node)
+    room_id = gateway.room_id_for_node(node)
     print(
         f"[property] {_node_display_name(node)} (id={node.id}, room_id={_display_optional(room_id)}, "
         f"nt={node.nt}, type={node.type}, pt={_display_optional(node.property_type)})",
@@ -384,8 +384,8 @@ def _print_property_change(change: PropertyChange, gateway: YeelightProGateway) 
 
 
 def _print_gateway_event(event: Any, gateway: YeelightProGateway) -> None:
-    node = gateway.state.nodes.get(event.id)
-    room_id = gateway.state.room_id_for_node(node) if node is not None else None
+    node = gateway.visible_node(event.id)
+    room_id = gateway.room_id_for_node(node) if node is not None else None
     name = _node_display_name(node) if node is not None else "<unknown>"
     print(
         f"[event] {name} (id={event.id}, room_id={_display_optional(room_id)}, nt={event.nt}) "
@@ -462,17 +462,17 @@ def _node_detail(node: TopologyNode, gateway: YeelightProGateway | None = None) 
 
 def _lookup_node(gateway: YeelightProGateway, raw_id: str) -> TopologyNode | None:
     node_id = _lookup_node_id(gateway, raw_id)
-    return gateway.state.nodes.get(node_id)
+    return gateway.visible_node(node_id)
 
 
 def _lookup_node_id(gateway: YeelightProGateway, raw_id: str) -> str | int:
-    if raw_id in gateway.state.nodes:
+    if gateway.visible_node(raw_id) is not None:
         return raw_id
     try:
         int_id = int(raw_id)
     except ValueError:
         return raw_id
-    return int_id if int_id in gateway.state.nodes else raw_id
+    return int_id if gateway.visible_node(int_id) is not None else raw_id
 
 
 def _parse_props(values: Sequence[str]) -> dict[str, Any]:

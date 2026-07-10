@@ -6,11 +6,11 @@ from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
 from typing import Any
 
-from ...core.coercion import int_or_none as _int_or_none
-from ...core.coercion import node_id_or_none
-from ...core.protocol import GatewayMethod, list_payload
-from ...core.topology import NodeType, Topology, TopologyNode
-from ...core.updates import PropertyChange
+from ..core.coercion import int_or_none as _int_or_none
+from ..core.coercion import node_id_or_none
+from ..core.protocol import GatewayMethod, list_payload
+from ..core.topology import NodeType, Topology, TopologyNode
+from ..core.updates import PropertyChange
 
 
 @dataclass
@@ -33,7 +33,7 @@ class UnknownPropertyNode:
         self.property_type = _int_or_none(item.get("pt")) if "pt" in item else self.property_type
 
 
-class GatewayState:
+class GatewaySnapshot:
     """In-memory topology and property state assembled from reads and pushes."""
 
     def __init__(self) -> None:

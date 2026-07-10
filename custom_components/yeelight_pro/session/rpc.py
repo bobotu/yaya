@@ -8,16 +8,16 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
-from ...core.const import DEFAULT_VERSION, GATEWAY_CONTROL_PORT
-from ...core.exceptions import (
+from ..core.const import DEFAULT_VERSION, GATEWAY_CONTROL_PORT
+from ..core.exceptions import (
     ConnectionClosed,
     GatewayErrorResponse,
     ProtocolFrameTooLarge,
     RequestTimeout,
     YeelightProError,
 )
-from ...core.protocol import build_request, parse_line
-from ..actors.base import create_actor_task
+from ..core.protocol import build_request, parse_line
+from .actor import create_actor_task
 
 JSONDict = dict[str, Any]
 PushListener = Callable[[Mapping[str, Any]], Awaitable[None] | None]
@@ -192,7 +192,7 @@ class GatewayRPC:
                     self._pending.pop(queued.request_id, None)
                     continue
                 if writer.is_closing():
-                    error = ConnectionClosed("gateway is not connected")
+                    error: YeelightProError = ConnectionClosed("gateway is not connected")
                     self._pending.pop(queued.request_id, None)
                     if not queued.future.done():
                         queued.future.set_exception(error)

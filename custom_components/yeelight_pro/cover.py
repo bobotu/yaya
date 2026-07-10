@@ -19,7 +19,7 @@ from .core.devices import CurtainDevice, DreamCurtainDevice, curtain_position_kn
 from .entity import YeelightProEntity, async_call_gateway
 from .helpers import int_param, is_cover_node, true_bool_param
 from .platform import async_add_dynamic_entities
-from .session.model import (
+from .session.motor import (
     MOTOR_MOTION_CLOSING,
     MOTOR_MOTION_OPENING,
     MOTOR_TRACKING_ASSUMED,

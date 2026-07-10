@@ -4,11 +4,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from ...core.coercion import int_or_none as _int_or_none
-from ...core.coercion import node_id_or_none
-from ...core.coercion import node_key as _node_key
-from ...core.topology import TopologyNode
-from ...core.updates import PropertyChange
+from ..core.coercion import int_or_none as _int_or_none
+from ..core.coercion import node_id_or_none
+from ..core.coercion import node_key as _node_key
+from ..core.topology import TopologyNode
+from ..core.updates import PropertyChange
 
 MOTOR_TRACKING_TTL = 120.0
 
@@ -28,7 +28,7 @@ MOTOR_MOTION_CLOSING = "closing"
 
 
 @dataclass(frozen=True)
-class MotorTargetIntent:
+class MotorTarget:
     node_id: str | int
     current_prop: str
     target_prop: str
@@ -56,29 +56,29 @@ class MotorStateTracker:
 
     def set_target(
         self,
-        intent: MotorTargetIntent,
+        target: MotorTarget,
         *,
         current_value: int | None,
         now: float,
         assumed: bool = True,
     ) -> set[str | int]:
-        normalized = _node_key(intent.node_id)
+        normalized = _node_key(target.node_id)
         if normalized is None:
             return set()
-        if current_value == intent.target_value:
-            return self.clear_axis(intent.node_id, intent.target_prop)
+        if current_value == target.target_value:
+            return self.clear_axis(target.node_id, target.target_prop)
         tracks = self._tracking.setdefault(normalized, {})
-        tracks[intent.target_prop] = MotorAxisTrack(
-            node_id=intent.node_id,
-            current_prop=intent.current_prop,
-            target_prop=intent.target_prop,
-            target_value=intent.target_value,
+        tracks[target.target_prop] = MotorAxisTrack(
+            node_id=target.node_id,
+            current_prop=target.current_prop,
+            target_prop=target.target_prop,
+            target_value=target.target_value,
             assumed=assumed,
             created_at=now,
             updated_at=now,
             expires_at=now + self.ttl,
         )
-        return {intent.node_id}
+        return {target.node_id}
 
     def apply_authoritative_changes(
         self,
@@ -131,7 +131,7 @@ class MotorStateTracker:
                 current_value = _int_or_none(current_params.get(axis.current_prop))
                 affected.update(
                     self.set_target(
-                        MotorTargetIntent(
+                        MotorTarget(
                             node_id=node_id,
                             current_prop=axis.current_prop,
                             target_prop=axis.target_prop,
