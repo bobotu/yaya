@@ -8,14 +8,16 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PORT, UnitOfTime
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_DEFAULT_LIGHT_TRANSITION,
     CONF_IMPORT_ROOM_IDS,
     CONF_SWITCH_MODES,
     CONF_WIRELESS_SWITCH_NODE_IDS,
+    DEFAULT_LIGHT_TRANSITION,
     DEFAULT_PORT,
     DEFAULT_REQUEST_TIMEOUT,
     DOMAIN,
@@ -95,6 +97,7 @@ class YeelightProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 room_options=self._gateway_options.room_options,
                 wireless_switch_node_ids=[],
                 switch_options=self._gateway_options.switch_options,
+                default_light_transition=DEFAULT_LIGHT_TRANSITION,
             ),
         )
 
@@ -135,6 +138,9 @@ class YeelightProOptionsFlow(config_entries.OptionsFlow):
                     switch_options,
                 ),
                 switch_options=switch_options,
+                default_light_transition=self.config_entry.options.get(
+                    CONF_DEFAULT_LIGHT_TRANSITION, DEFAULT_LIGHT_TRANSITION
+                ),
             ),
             errors=errors,
         )
@@ -166,6 +172,7 @@ def _import_filter_schema(
     room_options: list[selector.SelectOptionDict],
     wireless_switch_node_ids: list[str],
     switch_options: list[selector.SelectOptionDict],
+    default_light_transition: float,
 ) -> vol.Schema:
     return vol.Schema(
         {
@@ -185,6 +192,15 @@ def _import_filter_schema(
                     mode=selector.SelectSelectorMode.LIST,
                 )
             ),
+            vol.Optional(CONF_DEFAULT_LIGHT_TRANSITION, default=default_light_transition): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=10,
+                    step=0.1,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement=UnitOfTime.SECONDS,
+                )
+            ),
         }
     )
 
@@ -196,6 +212,7 @@ def _options_data(
 ) -> dict[str, Any]:
     wireless_switch_node_ids = {str(node_id) for node_id in user_input.get(CONF_WIRELESS_SWITCH_NODE_IDS, [])}
     return {
+        CONF_DEFAULT_LIGHT_TRANSITION: user_input.get(CONF_DEFAULT_LIGHT_TRANSITION, DEFAULT_LIGHT_TRANSITION),
         CONF_IMPORT_ROOM_IDS: [str(room_id) for room_id in user_input.get(CONF_IMPORT_ROOM_IDS, [])],
         CONF_SWITCH_MODES: {
             str(option["value"]): SWITCH_MODE_WIRELESS

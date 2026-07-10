@@ -8,15 +8,18 @@ pytest.importorskip("homeassistant")
 pytest.importorskip("pytest_homeassistant_custom_component")
 
 from homeassistant import data_entry_flow
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PORT, UnitOfTime
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import selector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.yeelight_pro.config_flow import CannotConnect, GatewayOptions
 from custom_components.yeelight_pro.const import (
+    CONF_DEFAULT_LIGHT_TRANSITION,
     CONF_IMPORT_ROOM_IDS,
     CONF_SWITCH_MODES,
     CONF_WIRELESS_SWITCH_NODE_IDS,
+    DEFAULT_LIGHT_TRANSITION,
     DOMAIN,
     SWITCH_MODE_RELAY,
     SWITCH_MODE_WIRELESS,
@@ -54,6 +57,7 @@ async def test_config_flow_creates_entry(hass: HomeAssistant) -> None:
             result["flow_id"],
             {
                 CONF_IMPORT_ROOM_IDS: ["room-1"],
+                CONF_DEFAULT_LIGHT_TRANSITION: DEFAULT_LIGHT_TRANSITION,
                 CONF_WIRELESS_SWITCH_NODE_IDS: ["switch-1"],
             },
         )
@@ -62,6 +66,7 @@ async def test_config_flow_creates_entry(hass: HomeAssistant) -> None:
     assert result["title"] == "192.0.2.10"
     assert result["data"] == {CONF_HOST: "192.0.2.10", CONF_PORT: 65443}
     assert result["options"] == {
+        CONF_DEFAULT_LIGHT_TRANSITION: DEFAULT_LIGHT_TRANSITION,
         CONF_IMPORT_ROOM_IDS: ["room-1"],
         CONF_SWITCH_MODES: {
             "switch-1": SWITCH_MODE_WIRELESS,
@@ -96,8 +101,19 @@ async def test_config_flow_import_filter_defaults_to_all_rooms(hass: HomeAssista
     schema = result["data_schema"].schema
     import_room_marker = next(marker for marker in schema if marker.schema == CONF_IMPORT_ROOM_IDS)
     wireless_marker = next(marker for marker in schema if marker.schema == CONF_WIRELESS_SWITCH_NODE_IDS)
+    transition_marker = next(marker for marker in schema if marker.schema == CONF_DEFAULT_LIGHT_TRANSITION)
     assert import_room_marker.default() == ["room-1", "room-2"]
     assert wireless_marker.default() == []
+    assert transition_marker.default() == DEFAULT_LIGHT_TRANSITION
+    transition_selector = schema[transition_marker]
+    assert isinstance(transition_selector, selector.NumberSelector)
+    assert transition_selector.config == {
+        "min": 0,
+        "max": 10,
+        "step": 0.1,
+        "mode": selector.NumberSelectorMode.BOX,
+        "unit_of_measurement": UnitOfTime.SECONDS,
+    }
 
 
 async def test_config_flow_reports_connection_failure(hass: HomeAssistant) -> None:
@@ -152,19 +168,23 @@ async def test_options_flow_updates_switch_modes(hass: HomeAssistant) -> None:
         schema = result["data_schema"].schema
         import_room_marker = next(marker for marker in schema if marker.schema == CONF_IMPORT_ROOM_IDS)
         wireless_marker = next(marker for marker in schema if marker.schema == CONF_WIRELESS_SWITCH_NODE_IDS)
+        transition_marker = next(marker for marker in schema if marker.schema == CONF_DEFAULT_LIGHT_TRANSITION)
         assert import_room_marker.default() == ["room-1"]
         assert wireless_marker.default() == ["switch-1"]
+        assert transition_marker.default() == DEFAULT_LIGHT_TRANSITION
 
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             {
                 CONF_IMPORT_ROOM_IDS: ["room-2"],
+                CONF_DEFAULT_LIGHT_TRANSITION: 2.0,
                 CONF_WIRELESS_SWITCH_NODE_IDS: ["double-switch-1"],
             },
         )
 
     assert result["type"] is data_entry_flow.FlowResultType.CREATE_ENTRY
     assert result["data"] == {
+        CONF_DEFAULT_LIGHT_TRANSITION: 2.0,
         CONF_IMPORT_ROOM_IDS: ["room-2"],
         CONF_SWITCH_MODES: {
             "switch-1": SWITCH_MODE_RELAY,

@@ -18,6 +18,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import DEFAULT_LIGHT_TRANSITION
 from .coordinator import YeelightProCoordinator
 from .core.commands import BlinkType
 from .core.devices import LightDevice
@@ -137,7 +138,7 @@ class YeelightProLight(YeelightProEntity, LightEntity):
             self.coordinator,
             node,
             props,
-            duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION)),
+            duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION, self.coordinator.default_light_transition)),
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
@@ -146,7 +147,7 @@ class YeelightProLight(YeelightProEntity, LightEntity):
             self.coordinator,
             node,
             {"p": False},
-            duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION)),
+            duration=_transition_to_duration(kwargs.get(ATTR_TRANSITION, self.coordinator.default_light_transition)),
         )
 
 
@@ -155,11 +156,9 @@ def _rgb_to_int(rgb_color: tuple[int, int, int]) -> int:
     return (red << 16) + (green << 8) + blue
 
 
-def _transition_to_duration(value: object) -> int | None:
-    if value is None:
-        return None
+def _transition_to_duration(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
+        value = DEFAULT_LIGHT_TRANSITION
     return max(0, min(3_600_000, round(value * 1000)))
 
 

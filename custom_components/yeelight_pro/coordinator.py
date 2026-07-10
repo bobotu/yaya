@@ -12,9 +12,11 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_DEFAULT_LIGHT_TRANSITION,
     CONF_IMPORT_ROOM_IDS,
     CONF_SWITCH_MODES,
     DEFAULT_HEARTBEAT_WATCHDOG_INTERVAL,
+    DEFAULT_LIGHT_TRANSITION,
     DEFAULT_RECONNECT_DELAY,
     DEFAULT_REQUEST_TIMEOUT,
     DOMAIN,
@@ -65,6 +67,9 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         self.entry = entry
         self.host: str = entry.data[CONF_HOST]
         self.port: int = entry.data.get(CONF_PORT, 65443)
+        self.default_light_transition: float = entry.options.get(
+            CONF_DEFAULT_LIGHT_TRANSITION, DEFAULT_LIGHT_TRANSITION
+        )
         self.import_room_ids: frozenset[str] = frozenset(
             str(room_id)
             for room_id in entry.options.get(CONF_IMPORT_ROOM_IDS, entry.data.get(CONF_IMPORT_ROOM_IDS, []))
