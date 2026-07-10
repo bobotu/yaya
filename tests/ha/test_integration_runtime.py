@@ -96,6 +96,8 @@ class FakeGateway:
     async def close(self) -> None:
         previous = self.session_state
         self.connected = False
+        self.state.clear_pending()
+        self._pending_batch_by_node.clear()
         self.session_state = GatewaySessionState.DISCONNECTED.value
         self._notify_session(GatewaySessionState.DISCONNECTED, previous=previous)
         self._closed.set()
@@ -112,8 +114,6 @@ class FakeGateway:
 
     async def sync(self, **kwargs: Any) -> None:
         self.sync_kwargs.append(kwargs)
-        self.state.clear_pending()
-        self._pending_batch_by_node.clear()
         self.state.apply_topology(self.fixture)
         self.last_full_sync_source = "poll"
         previous = self.session_state
@@ -135,18 +135,16 @@ class FakeGateway:
         *,
         nt: int = 2,
         duration: int | None = None,
-        state_targets: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.commands.append(NodeCommand(id=node_id, nt=nt, props=props, duration=duration))
-        batch_id: int | None = None
-        if state_targets:
-            batch_id, result = self.state.prepare_batch(
-                {node_id: state_targets},
-                deadline=asyncio.get_running_loop().time() + 10.0,
-            )
-            self._pending_batch_by_node[str(node_id)] = batch_id
-            if result.visible_changed:
-                self._notify_state({"method": "gateway_write.superseded"})
+        batch_id, result = self.state.prepare_batch(
+            {node_id: props},
+            deadline=asyncio.get_running_loop().time() + 10.0,
+        )
+        self._pending_batch_by_node[str(node_id)] = batch_id
+        self._forget_ended(result)
+        if result.visible_changed:
+            self._notify_state({"method": "gateway_write.superseded"})
         self._active_set_node_props += 1
         self.max_concurrent_set_node_props = max(self.max_concurrent_set_node_props, self._active_set_node_props)
         if self._active_set_node_props >= 2:
@@ -157,15 +155,15 @@ class FakeGateway:
             if self.next_set_node_props_error is not None:
                 error = self.next_set_node_props_error
                 self.next_set_node_props_error = None
-                if batch_id is not None:
-                    result = self.state.fail_batch(batch_id)
-                    if result.visible_changed:
-                        self._notify_state({"method": "gateway_write.failed"})
-                raise error
-            if batch_id is not None:
-                result = self.state.accept_batch(batch_id)
+                result = self.state.fail_batch(batch_id)
+                self._forget_ended(result)
                 if result.visible_changed:
-                    self._notify_state({"method": "gateway_write.accepted"})
+                    self._notify_state({"method": "gateway_write.failed"})
+                raise error
+            result = self.state.accept_batch(batch_id)
+            self._forget_ended(result)
+            if result.visible_changed:
+                self._notify_state({"method": "gateway_write.accepted"})
             return {"result": "ok"}
         finally:
             self._active_set_node_props -= 1
@@ -175,6 +173,26 @@ class FakeGateway:
 
     def visible_nodes(self) -> list[Any]:
         return list(self.state.nodes.values())
+
+    def room_records(self) -> tuple[Any, ...]:
+        return tuple(self.state.rooms.values())
+
+    def room_id_for_node(self, node: Any) -> Any:
+        return self.state.room_id_for_node(node)
+
+    def room_name(self, room_id: Any) -> str | None:
+        return self.state.room_name(room_id)
+
+    def is_full_property_snapshot(self, message: dict[str, Any]) -> bool:
+        return self.state.full_property_coverage(message)
+
+    def snapshot_diagnostics(self) -> dict[str, Any]:
+        return {
+            "visible_nodes": len(self.state.nodes),
+            "rooms": len(self.state.rooms),
+            "groups": len(self.state.groups),
+            "unknown_property_nodes": self.state.unknown_summary(),
+        }
 
     def has_pending_write(self, node_id: str | int, props: Any = None) -> bool:
         return self.state.has_pending(node_id, props)
@@ -234,6 +252,7 @@ class FakeGateway:
                 ],
             }
         )
+        self._forget_ended(result)
         if result.visible_changed:
             self._notify_state({"method": "gateway_post.prop"})
 
@@ -251,6 +270,7 @@ class FakeGateway:
             },
             match_batch_id=self._pending_batch_by_node.get(str(node_id)),
         )
+        self._forget_ended(result)
         if result.visible_changed:
             self._notify_state({"method": "gateway_get.node"})
 
@@ -260,8 +280,17 @@ class FakeGateway:
             return
         self.refreshed_node_ids.extend(pending_nodes)
         result = self.state.expire_due(now=asyncio.get_running_loop().time() + 3600)
+        self._forget_ended(result)
         if result.visible_changed:
             self._notify_state({"method": "gateway_write.expired"})
+
+    def _forget_ended(self, result: Any) -> None:
+        ended = set(result.ended_batch_ids)
+        if not ended:
+            return
+        self._pending_batch_by_node = {
+            node_id: batch_id for node_id, batch_id in self._pending_batch_by_node.items() if batch_id not in ended
+        }
 
     def _notify_state(self, message: dict[str, Any]) -> None:
         event = VisibleStateChanged(reason=_state_reason(message), message=message)
@@ -1788,8 +1817,9 @@ async def test_unknown_property_nodes_are_diagnostics_only(
         from custom_components.yeelight_pro.diagnostics import async_get_config_entry_diagnostics
 
         diagnostics = await async_get_config_entry_diagnostics(hass, entry)
-        assert diagnostics["unknown_property_nodes"]["count"] == 1
-        assert "nt=2;pt=None;params=l,p" in diagnostics["unknown_property_nodes"]["by_shape"]
+        unknown = diagnostics["state"]["unknown_property_nodes"]
+        assert unknown["count"] == 1
+        assert "nt=2;pt=None;params=l,p" in unknown["by_shape"]
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

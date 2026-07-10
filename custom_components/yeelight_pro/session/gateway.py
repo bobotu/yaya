@@ -71,7 +71,6 @@ class YeelightProGateway:
             motor_tracking_ttl=motor_tracking_ttl,
         )
         self._connection.set_session_sink(self._session.ref.tell)
-        self.state = self._session.store
 
     async def __aenter__(self) -> YeelightProGateway:
         await self.connect()
@@ -199,10 +198,8 @@ class YeelightProGateway:
     async def _send_node_commands(
         self,
         commands: Iterable[NodeCommand | NodeSet],
-        *,
-        state_targets_by_node: Mapping[NodeId, Mapping[str, Any]] | None = None,
     ) -> JSONDict:
-        return await self._session.submit_commands(commands, state_targets=state_targets_by_node)
+        return await self._session.submit_commands(commands)
 
     async def set_scenes(self, scenes: Iterable[Mapping[str, Any]]) -> JSONDict:
         payload = [dict(scene) for scene in scenes]
@@ -219,11 +216,8 @@ class YeelightProGateway:
     async def send_node_command(
         self,
         command: NodeCommand | NodeSet,
-        *,
-        state_targets: Mapping[str, Any] | None = None,
     ) -> JSONDict:
-        targets_by_node = {command.id: state_targets} if state_targets else None
-        return await self._send_node_commands([command], state_targets_by_node=targets_by_node)
+        return await self._send_node_commands([command])
 
     async def set_node_props(
         self,
@@ -232,13 +226,8 @@ class YeelightProGateway:
         *,
         nt: int = DEFAULT_MESH_NODE_TYPE,
         duration: int | None = None,
-        state_targets: Mapping[str, Any] | None = None,
     ) -> JSONDict:
-        targets_by_node = {node_id: state_targets} if state_targets else None
-        return await self._send_node_commands(
-            [NodeCommand(id=node_id, nt=nt, props=props, duration=duration)],
-            state_targets_by_node=targets_by_node,
-        )
+        return await self._send_node_commands([NodeCommand(id=node_id, nt=nt, props=props, duration=duration)])
 
     async def motor_adjust(
         self,
@@ -275,6 +264,21 @@ class YeelightProGateway:
 
     def visible_nodes(self) -> list[TopologyNode]:
         return self._session.visible_nodes()
+
+    def room_records(self) -> tuple[Mapping[str, Any], ...]:
+        return self._session.room_records()
+
+    def room_id_for_node(self, node: TopologyNode) -> NodeId | None:
+        return self._session.room_id_for_node(node)
+
+    def room_name(self, room_id: NodeId | None) -> str | None:
+        return self._session.room_name(room_id)
+
+    def is_full_property_snapshot(self, message: Mapping[str, Any]) -> bool:
+        return self._session.is_full_property_snapshot(message)
+
+    def snapshot_diagnostics(self) -> dict[str, Any]:
+        return self._session.snapshot_diagnostics()
 
     def has_pending_write(self, node_id: NodeId, props: Iterable[str] | None = None) -> bool:
         return self._session.has_pending_write(node_id, props)

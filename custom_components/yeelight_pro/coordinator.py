@@ -153,7 +153,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
             if should_import_node(
                 node,
                 import_room_ids=self.import_room_ids,
-                room_id=self.gateway.state.room_id_for_node(node),
+                room_id=self.gateway.room_id_for_node(node),
             )
         }
 
@@ -163,7 +163,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         if event.reason == StateChangeReason.TOPOLOGY_PUSH:
             self._log_gateway_snapshot("topology push", force=True)
         elif event.reason == StateChangeReason.PROPERTY_PUSH:
-            full_property_sync = self.gateway.state.full_property_coverage(event.message)
+            full_property_sync = self.gateway.is_full_property_snapshot(event.message)
             self._log_gateway_snapshot(
                 "full property push" if full_property_sync else "property push",
                 force=full_property_sync,
@@ -230,6 +230,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         return True
 
     def diagnostics(self) -> dict[str, Any]:
+        snapshot = self.gateway.snapshot_diagnostics()
         return {
             "session_state": str(self.gateway.session_state),
             "last_full_sync_at": self.gateway.last_full_sync_at.isoformat()
@@ -239,7 +240,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
             "last_disconnect_error": _error_diagnostics(self.gateway.last_disconnect_error),
             "pending_writes": self.gateway.write_diagnostics(),
             "motor_tracking": self.gateway.motor_tracking_diagnostics(),
-            "unknown_property_nodes": self.gateway.state.unknown_summary(),
+            "state": snapshot,
         }
 
     def _mark_gateway_unavailable(self, reason: str, exc: BaseException | None = None) -> None:
@@ -287,12 +288,13 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
 
     def _log_gateway_snapshot(self, reason: str = "sync", *, force: bool = False) -> None:
         imported_nodes = len(self._current_data())
-        unknown_summary = self.gateway.state.unknown_summary()
+        diagnostics = self.gateway.snapshot_diagnostics()
+        unknown_summary = diagnostics["unknown_property_nodes"]
         snapshot = (
-            len(self.gateway.state.nodes),
+            diagnostics["visible_nodes"],
             imported_nodes,
-            len(self.gateway.state.rooms),
-            len(self.gateway.state.groups),
+            diagnostics["rooms"],
+            diagnostics["groups"],
             unknown_summary["count"],
             tuple(sorted(unknown_summary["by_shape"].items())),
             self.gateway.last_full_sync_source,

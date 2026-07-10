@@ -250,21 +250,14 @@ class StateStore:
     def diagnostics(self, *, now: float) -> dict[str, Any]:
         return {
             "active_batches": len(self._batches),
+            "accepted_batches": sum(batch.accepted for batch in self._batches.values()),
+            "pending_nodes": len({node_key for node_key, _prop in self._owner}),
             "pending_properties": len(self._owner),
+            "observed_properties": sum(len(batch.observed) for batch in self._batches.values()),
             "next_deadline_in": min(
                 (round(batch.deadline - now, 3) for batch in self._batches.values()),
                 default=None,
             ),
-            "batches": [
-                {
-                    "id": batch.id,
-                    "accepted": batch.accepted,
-                    "target_count": len(batch.targets),
-                    "observed_count": len(batch.observed),
-                    "deadline_in": round(batch.deadline - now, 3),
-                }
-                for batch in sorted(self._batches.values(), key=lambda item: item.id)
-            ],
         }
 
     def full_property_coverage(self, message: Mapping[str, Any]) -> bool:

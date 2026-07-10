@@ -54,6 +54,7 @@ GatewayEventListener = Callable[[GatewayEventReceived], Awaitable[None] | None]
 _LOGGER = logging.getLogger(__name__)
 _MAX_LOG_ITEMS = 20
 _LIGHT_IMPLICIT_ON_PROPERTIES = frozenset({"l", "ct", "c", "angle"})
+_MOTOR_TARGET_PROPERTIES = frozenset({MOTOR_TARGET_POSITION_PROP, MOTOR_TARGET_ANGLE_PROP})
 
 DEFAULT_STATE_READBACK_DELAY = 6.0
 DEFAULT_STATE_DEADLINE = 10.0
@@ -107,7 +108,6 @@ class _ReadNode:
 class _WriteRequest:
     request_id: int
     commands: tuple[NodeCommand | NodeSet, ...]
-    state_targets: Mapping[NodeId, Mapping[str, Any]] | None
     future: asyncio.Future[JSONDict]
 
 
@@ -165,6 +165,18 @@ class GatewaySession(Actor[Any]):
         self._write_flush_task: asyncio.Task[None] | None = None
         self._write_deadline_task: asyncio.Task[None] | None = None
         self._readback_tasks: dict[int, asyncio.Task[None]] = {}
+        self._batch_started_at: dict[int, float] = {}
+        self._write_outcomes = {
+            "sent": 0,
+            "observed": 0,
+            "deadline": 0,
+            "rpc_failure": 0,
+            "superseded": 0,
+            "disconnect": 0,
+            "shutdown": 0,
+            "readbacks": 0,
+            "readback_failures": 0,
+        }
         self._motor_expiry_task: asyncio.Task[None] | None = None
         self._next_request_id = 0
         self._closing = False
@@ -239,8 +251,6 @@ class GatewaySession(Actor[Any]):
     async def submit_commands(
         self,
         commands: Iterable[NodeCommand | NodeSet],
-        *,
-        state_targets: Mapping[NodeId, Mapping[str, Any]] | None,
     ) -> JSONDict:
         command_tuple = tuple(commands)
         if not command_tuple:
@@ -255,7 +265,6 @@ class GatewaySession(Actor[Any]):
             _WriteRequest(
                 request_id=self._next_request_id,
                 commands=command_tuple,
-                state_targets=state_targets,
                 future=future,
             )
         )
@@ -284,10 +293,41 @@ class GatewaySession(Actor[Any]):
         return self.store.has_pending(node_id, props)
 
     def write_diagnostics(self) -> dict[str, Any]:
-        return self.store.diagnostics(now=asyncio.get_running_loop().time())
+        now = asyncio.get_running_loop().time()
+        return {
+            **self.store.diagnostics(now=now),
+            "queued_requests": len(self._pending_writes),
+            "scheduled_readbacks": len(self._readback_tasks),
+            "oldest_pending_age": max(
+                (round(now - started_at, 3) for started_at in self._batch_started_at.values()),
+                default=None,
+            ),
+            "outcomes": dict(self._write_outcomes),
+            "suppressed_visible_updates": sum(self._suppressed_snapshot_counts.values()),
+        }
 
     def motor_diagnostics(self) -> dict[str, Any]:
         return self.motor.diagnostics(now=asyncio.get_running_loop().time())
+
+    def room_records(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(self.store.rooms.values())
+
+    def room_id_for_node(self, node: TopologyNode) -> NodeId | None:
+        return self.store.room_id_for_node(node)
+
+    def room_name(self, room_id: NodeId | None) -> str | None:
+        return self.store.room_name(room_id)
+
+    def is_full_property_snapshot(self, message: Mapping[str, Any]) -> bool:
+        return self.store.full_property_coverage(message)
+
+    def snapshot_diagnostics(self) -> dict[str, Any]:
+        return {
+            "visible_nodes": len(self.store.nodes),
+            "rooms": len(self.store.rooms),
+            "groups": len(self.store.groups),
+            "unknown_property_nodes": self.store.unknown_summary(),
+        }
 
     def add_status_listener(self, listener: SessionStatusListener) -> Callable[[], None]:
         return _add_listener(self._status_listeners, listener)
@@ -309,6 +349,8 @@ class GatewaySession(Actor[Any]):
         error = ActorClosed("gateway session is closed")
         self._fail_write_requests(self._pending_writes, error)
         self._pending_writes.clear()
+        self._after_store_result(self.store.clear_pending(), ended_as="shutdown")
+        self.motor.clear_all()
         await super().close()
 
     async def handle(self, message: Any) -> Any:
@@ -381,22 +423,12 @@ class GatewaySession(Actor[Any]):
         self._clear_ready()
         self._sync_waiter = asyncio.get_running_loop().create_future()
         self.last_full_sync_source = None
-        before = self._visible_snapshot()
-        state_result = self.store.clear_pending()
-        motor_affected = self.motor.clear_all()
-        self._cancel_write_tasks()
-        await self._publish_if_changed(
-            before,
-            StateChangeReason.SESSION_RESET,
-            {"method": SyntheticSessionMethod.SESSION_RESET},
-            state_result=state_result,
-            force_node_ids=motor_affected,
-        )
         try:
             await self._set_session_state(GatewaySessionState.WAITING_TOPOLOGY)
             topology_message = await self._request(GatewayMethod.GET_TOPOLOGY)
             before = self._visible_snapshot()
             _topology, result = self.store.apply_topology(topology_message)
+            self._after_store_result(result, ended_as="observed")
             self.motor.clear_missing_nodes(self.store.nodes)
             await self._publish_if_changed(
                 before,
@@ -498,6 +530,7 @@ class GatewaySession(Actor[Any]):
         state_result = self.store.clear_pending()
         motor_affected = self.motor.clear_all()
         self._cancel_write_tasks()
+        self._after_store_result(state_result, ended_as="disconnect")
         await self._publish_if_changed(
             before,
             StateChangeReason.SESSION_RESET,
@@ -539,6 +572,7 @@ class GatewaySession(Actor[Any]):
         elif method == GatewayMethod.POST_TOPOLOGY:
             before = self._visible_snapshot()
             _topology, result = self.store.apply_topology(message, replace_existing=False)
+            self._after_store_result(result, ended_as="observed")
             motor_affected = self.motor.clear_missing_nodes(self.store.nodes)
             await self._publish_if_changed(
                 before,
@@ -567,7 +601,7 @@ class GatewaySession(Actor[Any]):
             self.store.raw.nodes,
             now=asyncio.get_running_loop().time(),
         )
-        self._after_store_result(result)
+        self._after_store_result(result, ended_as="observed")
         self._schedule_motor_expiry()
         if publish:
             await self._publish_if_changed(
@@ -597,7 +631,7 @@ class GatewaySession(Actor[Any]):
                 motor_affected.update(
                     self.motor.apply_authoritative_node(node_id, item.get("params"), self.store.raw.nodes, now=now)
                 )
-        self._after_store_result(result)
+        self._after_store_result(result, ended_as="observed")
         self._schedule_motor_expiry()
         if publish:
             await self._publish_if_changed(
@@ -635,16 +669,19 @@ class GatewaySession(Actor[Any]):
         self._pending_writes.clear()
         commands = tuple(command for request in requests for command in request.commands)
         payload = _batched_payload_from_commands(commands)
-        state_targets = _merge_state_targets(requests)
+        state_targets = _state_targets(commands)
         batch_id: int | None = None
 
         if state_targets:
             before = self._visible_snapshot()
+            now = asyncio.get_running_loop().time()
             batch_id, result = self.store.prepare_batch(
                 state_targets,
-                deadline=asyncio.get_running_loop().time() + self._state_deadline,
+                deadline=now + self._state_deadline,
             )
-            self._after_store_result(result)
+            self._batch_started_at[batch_id] = now
+            self._write_outcomes["sent"] += 1
+            self._after_store_result(result, ended_as="superseded")
             await self._publish_if_changed(
                 before,
                 StateChangeReason.WRITE_SUPERSEDED,
@@ -667,7 +704,7 @@ class GatewaySession(Actor[Any]):
             if batch_id is not None:
                 before = self._visible_snapshot()
                 result = self.store.fail_batch(batch_id)
-                self._after_store_result(result)
+                self._after_store_result(result, ended_as="rpc_failure")
                 await self._publish_if_changed(
                     before,
                     StateChangeReason.WRITE_FAILED,
@@ -680,7 +717,7 @@ class GatewaySession(Actor[Any]):
         before = self._visible_snapshot()
         result = self.store.accept_batch(batch_id) if batch_id is not None else StateResult()
         motor_affected = self._record_motor_commands(payload)
-        self._after_store_result(result)
+        self._after_store_result(result, ended_as="observed")
         await self._publish_if_changed(
             before,
             StateChangeReason.WRITE_ACCEPTED,
@@ -717,6 +754,7 @@ class GatewaySession(Actor[Any]):
         node_ids = self.store.pending_node_ids(batch_id)
         if not node_ids:
             return
+        self._write_outcomes["readbacks"] += 1
         before = self._visible_snapshot()
         combined = StateResult()
         motor_affected: set[NodeId] = set()
@@ -743,6 +781,7 @@ class GatewaySession(Actor[Any]):
                 combined = _merge_state_results(combined, result)
                 summaries.append(_message_summary(response))
             except Exception as exc:  # noqa: BLE001 - deadline remains the bounded fallback.
+                self._write_outcomes["readback_failures"] += 1
                 _LOGGER.debug("Yeelight Pro state readback failed: batch=%s node=%s error=%r", batch_id, node_id, exc)
         after = self._visible_snapshot()
         motor_affected.update(_changed_node_ids(before, after))
@@ -758,7 +797,7 @@ class GatewaySession(Actor[Any]):
         self._write_deadline_task = None
         before = self._visible_snapshot()
         result = self.store.expire_due(now=asyncio.get_running_loop().time())
-        self._after_store_result(result)
+        self._after_store_result(result, ended_as="deadline")
         await self._publish_if_changed(
             before,
             StateChangeReason.WRITE_EXPIRED,
@@ -779,8 +818,11 @@ class GatewaySession(Actor[Any]):
         )
         self._schedule_motor_expiry()
 
-    def _after_store_result(self, result: StateResult) -> None:
+    def _after_store_result(self, result: StateResult, *, ended_as: str | None = None) -> None:
+        if ended_as is not None and result.ended_batch_ids:
+            self._write_outcomes[ended_as] += len(result.ended_batch_ids)
         for batch_id in result.ended_batch_ids:
+            self._batch_started_at.pop(batch_id, None)
             task = self._readback_tasks.pop(batch_id, None)
             if task is not None:
                 task.cancel()
@@ -1080,13 +1122,24 @@ def _is_mergeable_set_payload(payload: Mapping[str, Any]) -> bool:
     return set(payload).issubset({"id", "nt", "duration", "delay", "delayOff", "set"})
 
 
-def _merge_state_targets(requests: Iterable[_WriteRequest]) -> dict[NodeId, dict[str, Any]]:
+def _state_targets(commands: Iterable[NodeCommand | NodeSet]) -> dict[NodeId, dict[str, Any]]:
     targets: dict[NodeId, dict[str, Any]] = {}
-    for request in requests:
-        if request.state_targets is None:
+    for command in commands:
+        payload = command.to_payload()
+        node_id = _item_id(payload)
+        props = payload.get("set")
+        if node_id is None or not isinstance(props, Mapping):
             continue
-        for node_id, props in request.state_targets.items():
-            targets.setdefault(node_id, {}).update(props)
+        node_targets = targets.setdefault(node_id, {})
+        node_targets.update(
+            (prop, value)
+            for prop, value in props.items()
+            if isinstance(prop, str) and prop not in _MOTOR_TARGET_PROPERTIES
+        )
+        if "p" not in props and _LIGHT_IMPLICIT_ON_PROPERTIES.intersection(props):
+            node_targets["p"] = True
+        if not node_targets:
+            targets.pop(node_id)
     return targets
 
 

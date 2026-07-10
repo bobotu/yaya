@@ -73,13 +73,13 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         try:
             await gateway.connect()
             response = await gateway.get_topology()
-            gateway.state.apply_topology(response)
+            gateway._session.store.apply_topology(response)
             await asyncio.sleep(0)
         finally:
             await gateway.close()
 
         self.assertEqual(response["id"], 1)
-        self.assertEqual(gateway.state.nodes["light-1"].params["p"], True)
+        self.assertEqual(gateway.visible_node("light-1").params["p"], True)  # type: ignore[union-attr]
 
     async def test_property_listener_receives_before_and_after_snapshots(self) -> None:
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -98,7 +98,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         changes: list[Any] = []
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
                     "groups": [],
@@ -141,8 +141,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await gateway.close()
 
         self.assertEqual(messages[0].message["method"], "gateway_post.topology")
-        self.assertEqual(gateway.state.nodes["new-light"].type, 3)
-        self.assertEqual(gateway.state.nodes["new-light"].params["p"], True)
+        self.assertEqual(gateway.visible_node("new-light").type, 3)  # type: ignore[union-attr]
+        self.assertEqual(gateway.visible_node("new-light").params["p"], True)  # type: ignore[union-attr]
 
     async def test_send_node_command_uses_gateway_payload(self) -> None:
         received: list[dict[str, Any]] = []
@@ -190,7 +190,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [
                         {"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}},
@@ -203,8 +203,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             )
             await gateway.connect()
             first, second = await asyncio.gather(
-                gateway.set_node_props("light-1", {"p": True}, state_targets={"p": True}),
-                gateway.set_node_props("light-2", {"p": False}, state_targets={"p": False}),
+                gateway.set_node_props("light-1", {"p": True}),
+                gateway.set_node_props("light-2", {"p": False}),
             )
         finally:
             await gateway.close()
@@ -239,7 +239,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False, "l": 80}}],
                     "groups": [],
@@ -249,8 +249,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             )
             await gateway.connect()
             await asyncio.gather(
-                gateway.set_node_props("light-1", {"p": True}, state_targets={"p": True}),
-                gateway.set_node_props("light-1", {"l": 42}, state_targets={"l": 42}),
+                gateway.set_node_props("light-1", {"p": True}),
+                gateway.set_node_props("light-1", {"l": 42}),
             )
         finally:
             await gateway.close()
@@ -280,7 +280,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
                     "groups": [],
@@ -290,8 +290,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             )
             await gateway.connect()
             await asyncio.gather(
-                gateway.set_node_props("light-1", {"p": True}, state_targets={"p": True}),
-                gateway.set_node_props("light-1", {"p": False}, state_targets={"p": False}),
+                gateway.set_node_props("light-1", {"p": True}),
+                gateway.set_node_props("light-1", {"p": False}),
             )
         finally:
             await gateway.close()
@@ -321,8 +321,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         try:
             await gateway.connect()
             results = await asyncio.gather(
-                gateway.set_node_props("light-1", {"p": True}, state_targets={"p": True}),
-                gateway.set_node_props("light-2", {"p": False}, state_targets={"p": False}),
+                gateway.set_node_props("light-1", {"p": True}),
+                gateway.set_node_props("light-2", {"p": False}),
                 return_exceptions=True,
             )
         finally:
@@ -372,7 +372,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 20, "tp": 20}}],
                     "groups": [],
@@ -382,7 +382,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             )
             await gateway.connect()
             await gateway.set_curtain_position("curtain-1", 80)
-            self.assertEqual(gateway.state.nodes["curtain-1"].params["cp"], 20)
+            self.assertEqual(gateway.visible_node("curtain-1").params["cp"], 20)  # type: ignore[union-attr]
             self.assertEqual(gateway.visible_node("curtain-1").params["cp"], 20)
             self.assertEqual(gateway.visible_node("curtain-1").params[MOTOR_TRACKING_TARGET_POSITION], 80)
         finally:
@@ -447,7 +447,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         host, port = await self.start_gateway(handler)
         gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0)
-        gateway.state.apply_topology(
+        gateway._session.store.apply_topology(
             {
                 "nodes": [{"id": "light-1", "nt": 2, "type": 3, "o": True, "params": {"p": True}}],
                 "groups": [],
@@ -458,7 +458,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             await gateway.connect()
-            await gateway.set_node_props("light-1", {"p": False}, state_targets={"p": False})
+            await gateway.set_node_props("light-1", {"p": False})
             await asyncio.sleep(0.02)
 
             self.assertTrue(gateway.visible_node("light-1").params["p"])
@@ -569,8 +569,8 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.close()
 
-        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
-        self.assertTrue(gateway.state.nodes["light-1"].online)
+        self.assertEqual(gateway.visible_node("light-1").params, {"p": True})  # type: ignore[union-attr]
+        self.assertTrue(gateway.visible_node("light-1").online)  # type: ignore[union-attr]
         self.assertIsNotNone(gateway.last_full_sync_at)
 
     async def test_sync_falls_back_to_poll_when_full_property_push_is_missing(self) -> None:
@@ -624,7 +624,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([request["method"] for request in received], ["gateway_get.topology", "gateway_get.node"])
         self.assertEqual(received[1]["params"], {"id": 0})
-        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
+        self.assertEqual(gateway.visible_node("light-1").params, {"p": True})  # type: ignore[union-attr]
         self.assertEqual(gateway.last_full_sync_source, "poll")
 
     async def test_topology_push_full_property_wait_falls_back_to_poll(self) -> None:
@@ -669,7 +669,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([request["method"] for request in received], ["gateway_get.node"])
         self.assertEqual(received[0]["params"], {"id": 0})
-        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
+        self.assertEqual(gateway.visible_node("light-1").params, {"p": True})  # type: ignore[union-attr]
         self.assertEqual(gateway.last_full_sync_source, "poll")
 
     async def test_concurrent_sync_requests_join_current_sync(self) -> None:
@@ -753,7 +753,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         gateway = YeelightProGateway(host, port=port)
 
         try:
-            gateway.state.apply_topology(
+            gateway._session.store.apply_topology(
                 {
                     "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False}}],
                     "groups": [],
@@ -772,7 +772,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.close()
 
-        self.assertEqual(gateway.state.nodes["light-1"].params["p"], False)
+        self.assertEqual(gateway.visible_node("light-1").params["p"], False)  # type: ignore[union-attr]
 
     async def test_start_runs_connection_supervision_and_initial_sync(self) -> None:
         statuses: list[Any] = []
@@ -811,7 +811,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await gateway.close()
 
-        self.assertEqual(gateway.state.nodes["light-1"].params, {"p": True})
+        self.assertEqual(gateway.visible_node("light-1").params, {"p": True})  # type: ignore[union-attr]
         self.assertEqual(gateway.session_state, "disconnected")
         self.assertIn("ready", [getattr(status, "current", None) for status in statuses])
 

@@ -157,8 +157,8 @@ async def _async_gateway_options(host: str, port: int) -> GatewayOptions:
             await gateway.connect()
             await gateway.sync(include_rooms=True)
             return GatewayOptions(
-                room_options=_room_options(gateway.state.rooms.values()),
-                switch_options=_switch_options(gateway.state.nodes.values()),
+                room_options=_room_options(gateway.room_records()),
+                switch_options=_switch_options(gateway.visible_nodes()),
             )
     except (OSError, TimeoutError, YeelightProError) as exc:
         raise CannotConnect from exc
