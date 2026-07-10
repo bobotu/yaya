@@ -58,6 +58,7 @@ python_version = "3.13"
 follow_imports = "silent"
 explicit_package_bases = true
 files = [
+    "custom_components/yeelight_pro/session/state.py",
     "custom_components/yeelight_pro/session/actors",
     "custom_components/yeelight_pro/session/messages",
     "custom_components/yeelight_pro/session/model",
