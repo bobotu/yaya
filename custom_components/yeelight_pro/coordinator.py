@@ -208,9 +208,6 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         return remove
 
     def node(self, node_id: str | int) -> TopologyNode | None:
-        node = self.gateway.visible_node(node_id)
-        if node is not None:
-            return node
         return (self.data or {}).get(node_key(node_id))
 
     def nodes(self) -> list[TopologyNode]:

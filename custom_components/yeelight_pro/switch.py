@@ -75,11 +75,6 @@ class YeelightProRelaySwitch(YeelightProEntity, SwitchEntity):
         self._attr_translation_placeholders = {"channel": str(channel)}
 
     @property
-    def intent_properties(self) -> tuple[str, ...]:
-        node = self.node
-        return () if node is None else (relay_prop_name(node, self._channel),)
-
-    @property
     def is_on(self) -> bool | None:
         node = self.node
         if node is None:
@@ -124,10 +119,6 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
         super().__init__(coordinator, node, prop)
         self._prop = prop
         self._attr_translation_key = translation_key
-
-    @property
-    def intent_properties(self) -> tuple[str, ...]:
-        return (self._prop,)
 
     @property
     def is_on(self) -> bool | None:
