@@ -12,7 +12,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .const import PLATFORMS
     from .coordinator import YeelightProCoordinator
-    from .core import YeelightProError
+    from .gateway import YeelightProError
 
     coordinator = YeelightProCoordinator(hass, entry)
     try:

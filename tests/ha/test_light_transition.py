@@ -11,7 +11,7 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 from homeassistant.components.light import ATTR_TRANSITION
 
 from custom_components.yeelight_pro.const import DEFAULT_LIGHT_TRANSITION
-from custom_components.yeelight_pro.core import DeviceType, NodeType, TopologyNode
+from custom_components.yeelight_pro.gateway import DeviceType, NodeType, TopologyNode
 from custom_components.yeelight_pro.light import YeelightProLight
 
 

@@ -9,14 +9,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from ..core.coercion import int_or_none as _int_or_none
-from ..core.coercion import node_key as _node_key
-from ..core.commands import MotorAction, NodeCommand, NodeSet
-from ..core.events import iter_gateway_events
-from ..core.exceptions import ProtocolError, YeelightProError
-from ..core.protocol import GatewayMethod, list_payload
-from ..core.topology import NodeId, NodeType, TopologyNode
-from ..core.updates import PropertyChange
+from ..gateway.coercion import int_or_none as _int_or_none
+from ..gateway.coercion import node_key as _node_key
+from ..gateway.commands import MotorAction, NodeCommand, NodeSet
+from ..gateway.events import iter_gateway_events
+from ..gateway.exceptions import ProtocolError, YeelightProError
+from ..gateway.protocol import GatewayMethod, list_payload
+from ..gateway.topology import NodeId, NodeType, TopologyNode
+from ..gateway.updates import PropertyChange
 from .actor import Actor, ActorClosed, ActorRef, create_actor_task
 from .connection import (
     ConnectConnectionCommand,

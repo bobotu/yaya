@@ -8,8 +8,8 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
-from .core import GatewayEvent, is_knob_capable
 from .entity import YeelightProEntity
+from .gateway import GatewayEvent, is_knob_capable
 from .helpers import button_count, event_data, event_types_for_node, is_programmable_node, node_unique_id
 from .platform import async_add_dynamic_entities
 

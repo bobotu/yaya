@@ -4,8 +4,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, TypeAlias
 
-from ..core.protocol import GatewayMethod, list_payload
-from ..core.topology import NodeId, Topology, TopologyNode
+from ..gateway.protocol import GatewayMethod, list_payload
+from ..gateway.topology import NodeId, Topology, TopologyNode
 from ._snapshot import GatewaySnapshot, UnknownPropertyNode
 
 PropertyKey: TypeAlias = tuple[str, str]

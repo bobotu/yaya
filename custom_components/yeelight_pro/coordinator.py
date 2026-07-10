@@ -22,7 +22,7 @@ from .const import (
     DOMAIN,
     EVENT_YEELIGHT_PRO,
 )
-from .core import GatewayEvent, TopologyNode, YeelightProError
+from .gateway import GatewayEvent, TopologyNode, YeelightProError
 from .helpers import (
     device_model_key,
     event_data,

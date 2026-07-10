@@ -7,9 +7,9 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from yeelight_pro.core.capabilities import capabilities_for_node
-from yeelight_pro.core.commands import BlinkType, MotorAction
-from yeelight_pro.core.devices import (
+from yeelight_pro.gateway.capabilities import capabilities_for_node
+from yeelight_pro.gateway.commands import BlinkType, MotorAction
+from yeelight_pro.gateway.devices import (
     AirConditionDevice,
     BathHeaterDevice,
     CurtainDevice,
@@ -17,9 +17,9 @@ from yeelight_pro.core.devices import (
     DreamCurtainDevice,
     LightDevice,
 )
-from yeelight_pro.core.discovery import discover_gateways
-from yeelight_pro.core.topology import NodeType, TopologyNode
-from yeelight_pro.core.updates import PropertyChange
+from yeelight_pro.gateway.discovery import discover_gateways
+from yeelight_pro.gateway.topology import NodeType, TopologyNode
+from yeelight_pro.gateway.updates import PropertyChange
 from yeelight_pro.session import YeelightProGateway
 
 

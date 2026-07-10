@@ -24,7 +24,7 @@ from .const import (
     SWITCH_MODE_RELAY,
     SWITCH_MODE_WIRELESS,
 )
-from .core import TopologyNode, YeelightProError
+from .gateway import TopologyNode, YeelightProError
 from .helpers import is_switch_mode_configurable_node, node_key
 from .session import YeelightProGateway
 

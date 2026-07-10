@@ -9,8 +9,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import YeelightProCoordinator
-from .core import TopologyNode
 from .entity import YeelightProEntity
+from .gateway import TopologyNode
 from .helpers import node_key
 
 EntityFactory = Callable[[TopologyNode], Iterable[YeelightProEntity]]

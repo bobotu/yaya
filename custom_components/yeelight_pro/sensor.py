@@ -12,8 +12,8 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
-from .core import is_knob_capable
 from .entity import YeelightProEntity
+from .gateway import is_knob_capable
 from .helpers import int_param
 from .platform import async_add_dynamic_entities
 

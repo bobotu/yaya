@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypeAlias
 
-from ..core.events import GatewayEvent
-from ..core.updates import PropertyChange
+from ..gateway.events import GatewayEvent
+from ..gateway.updates import PropertyChange
 from .status import GatewaySessionState
 
 

@@ -71,10 +71,10 @@ class PackagingLayoutTests(unittest.TestCase):
         sys.path.insert(0, str(ROOT / "custom_components"))
         try:
             import dev_tools.yeelight_pro_cli as cli  # noqa: PLC0415
-            import yeelight_pro.core as core  # noqa: PLC0415
+            import yeelight_pro.gateway as gateway  # noqa: PLC0415
             import yeelight_pro.session as session  # noqa: PLC0415
 
-            self.assertTrue(hasattr(core, "iter_gateway_events"))
+            self.assertTrue(hasattr(gateway, "iter_gateway_events"))
             self.assertTrue(hasattr(session, "YeelightProGateway"))
             self.assertTrue(hasattr(cli, "async_main"))
         finally:

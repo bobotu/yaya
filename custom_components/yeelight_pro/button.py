@@ -9,8 +9,8 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
-from .core.devices import LightDevice
 from .entity import YeelightProEntity, async_call_gateway
+from .gateway.devices import LightDevice
 from .helpers import light_device_type
 from .platform import async_add_dynamic_entities
 

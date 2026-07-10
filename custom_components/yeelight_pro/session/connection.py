@@ -7,7 +7,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
-from ..core.exceptions import ConnectionClosed, YeelightProError
+from ..gateway.exceptions import ConnectionClosed, YeelightProError
 from .actor import Actor, ActorRef, create_actor_task
 from .rpc import GatewayRPC
 
