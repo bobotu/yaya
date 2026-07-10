@@ -148,16 +148,16 @@ async def async_set_node_props(
     props: Mapping[str, Any],
     *,
     duration: int | None = None,
-    track_intent: bool = True,
+    track_state: bool = True,
 ) -> dict[str, Any]:
-    intent_props = props if track_intent else None
+    state_targets = props if track_state else None
     _LOGGER.debug(
-        "Yeelight Pro HA service set props: node_id=%s nt=%s props=%s duration=%s track_intent=%s",
+        "Yeelight Pro HA service set props: node_id=%s nt=%s props=%s duration=%s track_state=%s",
         node.id,
         node.nt,
         dict(props),
         duration,
-        track_intent,
+        track_state,
     )
     return await async_call_gateway(
         coordinator.gateway.set_node_props(
@@ -165,6 +165,6 @@ async def async_set_node_props(
             props,
             nt=node.nt,
             duration=duration,
-            intent_props=intent_props,
+            state_targets=state_targets,
         )
     )

@@ -237,7 +237,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
             else None,
             "last_full_sync_source": self.gateway.last_full_sync_source,
             "last_disconnect_error": _error_diagnostics(self.gateway.last_disconnect_error),
-            "command_intents": self.gateway.intent_diagnostics(),
+            "pending_writes": self.gateway.write_diagnostics(),
             "motor_tracking": self.gateway.motor_tracking_diagnostics(),
             "unknown_property_nodes": self.gateway.state.unknown_summary(),
         }

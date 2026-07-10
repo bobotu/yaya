@@ -11,6 +11,7 @@ from .messages import (
     SyntheticSessionMethod,
 )
 from .model import GatewaySessionState, GatewayState, UnknownPropertyNode
+from .state import PendingBatch, StateResult, StateStore
 from .transport import GatewayRPC
 
 __all__ = [
@@ -23,7 +24,10 @@ __all__ = [
     "SessionStatusChanged",
     "StateChangeReason",
     "StateSnapshotChanged",
+    "StateResult",
+    "StateStore",
     "SyntheticSessionMethod",
     "UnknownPropertyNode",
+    "PendingBatch",
     "YeelightProGateway",
 ]

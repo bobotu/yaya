@@ -10,11 +10,14 @@ class StateChangeReason(StrEnum):
     TOPOLOGY_PUSH = "topology push"
     PROPERTY_PUSH = "property push"
     GENERIC_PUSH = "generic push"
-    NODE_REFRESH = "node refresh"
+    STATE_READBACK = "state readback"
     POLL_FULL_PROPERTIES = "poll full properties"
-    COMMAND_INTENT_RECORDED = "command intent recorded"
-    COMMAND_INTENT_CLEARED = "command intent cleared"
-    COMMAND_INTENT_EXPIRED = "command intent expired"
+    WRITE_SUPERSEDED = "write superseded"
+    WRITE_ACCEPTED = "write accepted"
+    WRITE_FAILED = "write failed"
+    WRITE_EXPIRED = "write expired"
+    MOTOR_TRACKING_EXPIRED = "motor tracking expired"
+    SESSION_RESET = "session reset"
 
 
 class FullSyncSource(StrEnum):
@@ -25,6 +28,10 @@ class FullSyncSource(StrEnum):
 class SyntheticSessionMethod(StrEnum):
     SYNC_TOPOLOGY = "gateway_sync.topology"
     SYNC_COMPLETE = "gateway_sync.complete"
-    COMMAND_INTENT_RECORDED = "gateway_intent.recorded"
-    COMMAND_INTENT_CLEAR = "gateway_intent.clear"
-    COMMAND_INTENT_EXPIRED = "gateway_intent.expired"
+    STATE_READBACK = "gateway_state.readback"
+    WRITE_SUPERSEDED = "gateway_write.superseded"
+    WRITE_ACCEPTED = "gateway_write.accepted"
+    WRITE_FAILED = "gateway_write.failed"
+    WRITE_EXPIRED = "gateway_write.expired"
+    MOTOR_TRACKING_EXPIRED = "gateway_motor.expired"
+    SESSION_RESET = "gateway_session.reset"

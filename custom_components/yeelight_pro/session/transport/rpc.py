@@ -192,7 +192,7 @@ class GatewayRPC:
                     self._pending.pop(queued.request_id, None)
                     continue
                 if writer.is_closing():
-                    error = ConnectionClosed("gateway is not connected")
+                    error: YeelightProError = ConnectionClosed("gateway is not connected")
                     self._pending.pop(queued.request_id, None)
                     if not queued.future.done():
                         queued.future.set_exception(error)

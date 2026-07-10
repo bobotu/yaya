@@ -3,54 +3,104 @@ from __future__ import annotations
 import asyncio
 import sys
 import unittest
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
+from yeelight_pro.core import ConnectionClosed, NodeCommand, ProtocolError  # noqa: E402
+from yeelight_pro.core.commands import MotorAction, motor_adjust_action  # noqa: E402
 from yeelight_pro.session.actors import (  # noqa: E402
     Actor,
     ActorClosed,
     ActorReentrancyError,
     ActorRef,
-    DeviceStateActor,
     create_actor_task,
 )
 from yeelight_pro.session.messages import (  # noqa: E402
-    ApplyGroupsCommand,
-    ApplyPropertiesCommand,
-    ApplyTopologyCommand,
-    PrepareCommandIntentCommand,
-    RecordCommandIntentCommand,
-    SessionStatusChanged,
-    StateSnapshotChanged,
-    SyncStartedEvent,
+    ConnectionLostEvent,
+    GatewayRpcRequest,
+    RpcPushEvent,
 )
 from yeelight_pro.session.model import (  # noqa: E402
     MOTOR_TRACKING_POSITION_MOTION,
     MOTOR_TRACKING_TARGET_POSITION,
-    GatewaySessionState,
-    MotorTargetIntent,
 )
+from yeelight_pro.session.runtime import GatewaySession  # noqa: E402
+
+
+class FakeConnectionRef:
+    def __init__(self) -> None:
+        self.requests: list[GatewayRpcRequest] = []
+        self.write_response: Mapping[str, Any] | BaseException = {"result": "ok"}
+        self.node_responses: dict[str, Mapping[str, Any] | BaseException] = {}
+        self.group_responses: dict[str, Mapping[str, Any] | BaseException] = {}
+
+    async def ask(self, message: Any) -> dict[str, Any] | None:
+        if not isinstance(message, GatewayRpcRequest):
+            return None
+        self.requests.append(message)
+        if message.method == "gateway_set.prop":
+            return _response_or_raise(self.write_response)
+        params = {} if message.payload is None else message.payload.get("params", {})
+        node_id = str(params.get("id")) if isinstance(params, Mapping) else "None"
+        if message.method == "gateway_get.node":
+            return _response_or_raise(self.node_responses.get(node_id, {"nodes": []}))
+        if message.method == "gateway_get.group":
+            return _response_or_raise(self.group_responses.get(node_id, {"groups": []}))
+        return {}
+
+
+def _response_or_raise(value: Mapping[str, Any] | BaseException) -> dict[str, Any]:
+    if isinstance(value, BaseException):
+        raise value
+    return dict(value)
+
+
+def _topology(*nodes: tuple[str, int, dict[str, object]]) -> dict[str, object]:
+    return {
+        "nodes": [
+            {"id": node_id, "nt": node_type, "type": 3 if node_type in {2, 4} else 6, "o": True, "params": params}
+            for node_id, node_type, params in nodes
+        ],
+        "groups": [],
+        "rooms": [],
+        "scenes": [],
+    }
+
+
+def _push(node_id: str, **params: object) -> dict[str, object]:
+    return {"method": "gateway_post.prop", "nodes": [{"id": node_id, "nt": 2, "params": params}]}
 
 
 class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self) -> None:
+        for session in getattr(self, "sessions", []):
+            await session.close()
+
+    def session(self, connection: FakeConnectionRef, **kwargs: Any) -> GatewaySession:
+        session = GatewaySession(connection_ref=connection, **kwargs)  # type: ignore[arg-type]
+        self.sessions = [*getattr(self, "sessions", []), session]
+        return session
+
     async def test_actor_mailbox_serializes_concurrent_asks(self) -> None:
-        class RecordingActor(Actor):
+        class RecordingActor(Actor[int]):
             def __init__(self) -> None:
                 super().__init__("test-recording-actor")
                 self.active = 0
                 self.max_active = 0
                 self.handled: list[int] = []
 
-            async def handle(self, message: object) -> object:
+            async def handle(self, message: int) -> int:
                 self.active += 1
                 self.max_active = max(self.max_active, self.active)
                 await asyncio.sleep(0)
-                self.handled.append(int(message))
+                self.handled.append(message)
                 self.active -= 1
                 return message
 
@@ -65,23 +115,8 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actor.handled, [0, 1, 2, 3, 4])
         self.assertEqual(actor.max_active, 1)
 
-    async def test_actor_only_exposes_messaging_through_ref(self) -> None:
-        class RefOnlyActor(Actor):
-            async def handle(self, message: object) -> object:
-                return message
-
-        actor = RefOnlyActor("test-ref-only-actor")
-        ref = ActorRef(actor)
-        try:
-            self.assertFalse(hasattr(actor, "ask"))
-            self.assertFalse(hasattr(actor, "tell"))
-            self.assertFalse(hasattr(actor, "ref"))
-            self.assertEqual(await ref.ask("message"), "message")
-        finally:
-            await actor.close()
-
     async def test_actor_rejects_messages_after_close(self) -> None:
-        class ClosedActor(Actor):
+        class ClosedActor(Actor[object]):
             async def handle(self, message: object) -> object:
                 return message
 
@@ -99,13 +134,10 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, ref: ActorRef[object]) -> None:
                 self.target_ref = ref
 
-            def __str__(self) -> str:
-                return "spawn"
-
             async def run(self) -> None:
                 await self.target_ref.tell("inner")
 
-        class SpawningActor(Actor):
+        class SpawningActor(Actor[object]):
             def __init__(self) -> None:
                 super().__init__("test-spawning-actor")
                 self.active = 0
@@ -116,9 +148,11 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.active += 1
                 self.max_active = max(self.max_active, self.active)
                 if isinstance(message, SpawnWorker):
-                    create_actor_task(message.run(), name="test-spawning-actor-inner")
+                    create_actor_task(message.run(), name="test-spawn-worker")
                     await asyncio.sleep(0.01)
-                self.handled.append(str(message))
+                    self.handled.append("spawn")
+                else:
+                    self.handled.append(str(message))
                 self.active -= 1
                 return message
 
@@ -134,18 +168,17 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actor.max_active, 1)
 
     async def test_actor_defer_queues_after_current_message(self) -> None:
-        class DeferActor(Actor):
+        class DeferActor(Actor[str]):
             def __init__(self) -> None:
                 super().__init__("test-defer-actor")
                 self.handled: list[str] = []
 
-            async def handle(self, message: object) -> object:
+            async def handle(self, message: str) -> None:
                 if message == "outer":
                     await self.defer("inner")
-                    self.handled.append("outer-done")
-                    return None
-                self.handled.append(str(message))
-                return None
+                    self.handled.append("outer")
+                    return
+                self.handled.append(message)
 
         actor = DeferActor()
         ref = ActorRef(actor)
@@ -155,20 +188,20 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await actor.close()
 
-        self.assertEqual(actor.handled, ["outer-done", "inner"])
+        self.assertEqual(actor.handled, ["outer", "inner"])
 
-    async def test_actor_self_ask_is_rejected_instead_of_deadlocking(self) -> None:
+    async def test_actor_self_messages_are_rejected(self) -> None:
         @dataclass(frozen=True)
         class AskSelf:
             target_ref: ActorRef[object]
 
-        class SelfAskActor(Actor):
+        class SelfActor(Actor[object]):
             async def handle(self, message: object) -> object:
                 if isinstance(message, AskSelf):
                     await message.target_ref.ask("inner")
                 return message
 
-        actor = SelfAskActor("test-self-ask-actor")
+        actor = SelfActor("test-self-actor")
         ref = ActorRef(actor)
         try:
             with self.assertRaises(ActorReentrancyError):
@@ -176,621 +209,227 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await actor.close()
 
-    async def test_actor_self_ref_tell_is_rejected(self) -> None:
-        @dataclass(frozen=True)
-        class TellSelf:
-            target_ref: ActorRef[object]
+    async def test_write_ack_holds_visible_state_until_target_push(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(connection, set_prop_batch_delay=0)
+        session.store.apply_topology(_topology(("light-a", 2, {"p": True})))
+        events: list[Any] = []
+        session.add_state_listener(events.append)
 
-        class SelfTellActor(Actor):
-            async def handle(self, message: object) -> object:
-                if isinstance(message, TellSelf):
-                    await message.target_ref.tell("inner")
-                return message
+        response = await session.submit_commands(
+            [NodeCommand(id="light-a", nt=2, props={"p": False})],
+            state_targets={"light-a": {"p": False}},
+        )
 
-        actor = SelfTellActor("test-self-tell-actor")
-        ref = ActorRef(actor)
-        try:
-            with self.assertRaises(ActorReentrancyError):
-                await ref.ask(TellSelf(ref))
-        finally:
-            await actor.close()
+        self.assertEqual(response, {"result": "ok"})
+        self.assertTrue(session.has_pending_write("light-a", ["p"]))
+        self.assertTrue(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
 
-    async def test_device_state_listener_exception_does_not_block_other_subscribers(self) -> None:
-        state = DeviceStateActor()
-        state_ref = ActorRef(state)
-        received: list[str] = []
+        await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=True)))
+        await asyncio.sleep(0)
+        self.assertEqual(events, [])
 
-        def broken_listener(_event: StateSnapshotChanged) -> None:
+        await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=False)))
+        await asyncio.sleep(0)
+
+        self.assertFalse(session.has_pending_write("light-a"))
+        self.assertFalse(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+        self.assertEqual(len(events), 1)
+
+    async def test_gateway_batch_releases_members_in_one_state_event(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(connection, set_prop_batch_delay=0)
+        session.store.apply_topology(
+            _topology(
+                ("light-a", 2, {"l": 20}),
+                ("light-b", 2, {"l": 20}),
+            )
+        )
+        events: list[Any] = []
+        session.add_state_listener(events.append)
+
+        await session.submit_commands(
+            [
+                NodeCommand(id="light-a", nt=2, props={"l": 80}),
+                NodeCommand(id="light-b", nt=2, props={"l": 80}),
+            ],
+            state_targets={"light-a": {"l": 80}, "light-b": {"l": 80}},
+        )
+        await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", l=80)))
+        await asyncio.sleep(0)
+
+        self.assertEqual(events, [])
+        self.assertEqual(session.visible_node("light-a").params["l"], 20)  # type: ignore[union-attr]
+
+        await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-b", l=80)))
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual({change.id for change in events[0].changes}, {"light-a", "light-b"})
+
+    async def test_delayed_readback_uses_group_api_and_confirms_batch(self) -> None:
+        connection = FakeConnectionRef()
+        connection.group_responses["group-a"] = {
+            "groups": [{"id": "group-a", "nt": 4, "o": True, "params": {"p": False}}]
+        }
+        session = self.session(
+            connection,
+            set_prop_batch_delay=0,
+            state_readback_delay=0.01,
+            state_deadline=0.1,
+        )
+        session.store.apply_topology(_topology(("group-a", 4, {"p": True})))
+
+        await session.submit_commands(
+            [NodeCommand(id="group-a", nt=4, props={"p": False})],
+            state_targets={"group-a": {"p": False}},
+        )
+        await asyncio.sleep(0.04)
+
+        self.assertFalse(session.has_pending_write("group-a"))
+        self.assertFalse(session.visible_node("group-a").params["p"])  # type: ignore[union-attr]
+        self.assertIn("gateway_get.group", [request.method for request in connection.requests])
+        self.assertNotIn("gateway_get.node", [request.method for request in connection.requests])
+
+    async def test_deadline_releases_latest_raw_without_unavailable(self) -> None:
+        connection = FakeConnectionRef()
+        connection.node_responses["light-a"] = {"nodes": [{"id": "light-a", "nt": 2, "o": True, "params": {"l": 40}}]}
+        session = self.session(
+            connection,
+            set_prop_batch_delay=0,
+            state_readback_delay=0.01,
+            state_deadline=0.03,
+        )
+        session.store.apply_topology(_topology(("light-a", 2, {"l": 20})))
+
+        await session.submit_commands(
+            [NodeCommand(id="light-a", nt=2, props={"l": 80})],
+            state_targets={"light-a": {"l": 80}},
+        )
+        await asyncio.sleep(0.06)
+
+        node = session.visible_node("light-a")
+        self.assertIsNotNone(node)
+        self.assertEqual(node.params["l"], 40)  # type: ignore[union-attr]
+        self.assertTrue(node.online)  # type: ignore[union-attr]
+        self.assertFalse(session.has_pending_write("light-a"))
+
+    async def test_rpc_failure_releases_hold_and_fails_caller(self) -> None:
+        connection = FakeConnectionRef()
+        connection.write_response = {"result": "fail"}
+        session = self.session(connection, set_prop_batch_delay=0)
+        session.store.apply_topology(_topology(("light-a", 2, {"p": False})))
+
+        with self.assertRaises(ProtocolError):
+            await session.submit_commands(
+                [NodeCommand(id="light-a", nt=2, props={"p": True})],
+                state_targets={"light-a": {"p": True}},
+            )
+
+        self.assertFalse(session.has_pending_write("light-a"))
+        self.assertFalse(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+
+    async def test_connection_loss_clears_pending_hold(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(connection, set_prop_batch_delay=0)
+        session.store.apply_topology(_topology(("light-a", 2, {"p": True})))
+        await session.submit_commands(
+            [NodeCommand(id="light-a", nt=2, props={"p": False})],
+            state_targets={"light-a": {"p": False}},
+        )
+
+        await session.ref.ask(ConnectionLostEvent(epoch=0, error=ConnectionClosed("closed")))
+
+        self.assertFalse(session.has_pending_write("light-a"))
+        self.assertTrue(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+
+    async def test_motor_projection_remains_domain_specific(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(connection, set_prop_batch_delay=0)
+        session.store.apply_topology(_topology(("curtain-a", 6, {"cp": 20, "tp": 20})))
+
+        await session.submit_commands(
+            [NodeCommand(id="curtain-a", nt=2, props={"tp": 80})],
+            state_targets=None,
+        )
+
+        moving = session.visible_node("curtain-a")
+        self.assertEqual(moving.params["cp"], 20)  # type: ignore[union-attr]
+        self.assertEqual(moving.params[MOTOR_TRACKING_TARGET_POSITION], 80)  # type: ignore[union-attr]
+        self.assertEqual(moving.params[MOTOR_TRACKING_POSITION_MOTION], "opening")  # type: ignore[union-attr]
+
+        await session.submit_commands(
+            [NodeCommand(id="curtain-a", nt=2, action=motor_adjust_action(MotorAction.PAUSE))],
+            state_targets=None,
+        )
+
+        stopped = session.visible_node("curtain-a")
+        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, stopped.params)  # type: ignore[union-attr]
+
+    async def test_listener_failure_does_not_block_other_subscribers(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(connection)
+        session.store.apply_topology(_topology(("light-a", 2, {"p": False})))
+        delivered: list[Any] = []
+
+        def broken(_event: Any) -> None:
             raise RuntimeError("listener failed")
 
-        state.add_state_listener(broken_listener)
-        state.add_state_listener(lambda event: received.append(event.reason))
+        session.add_state_listener(broken)
+        session.add_state_listener(delivered.append)
 
-        with self.assertLogs("yeelight_pro.session.actors.device_state", level="ERROR"):
-            await state_ref.ask(
-                ApplyTopologyCommand(
-                    payload=_topology(False),
-                    reason="topology sync",
-                    message={"method": "gateway_sync.topology"},
-                )
-            )
+        await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=True)))
+        await asyncio.sleep(0.02)
 
-        self.assertEqual(received, ["topology sync"])
-        await state.close()
+        self.assertEqual(len(delivered), 1)
 
-    async def test_device_state_clears_intents_on_sync_and_disconnect_events(self) -> None:
-        state = DeviceStateActor()
-        state_ref = ActorRef(state)
-        snapshots: list[StateSnapshotChanged] = []
-        state.add_state_listener(snapshots.append)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload=_topology(False),
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
+    async def test_drain_flushes_queued_writes_and_rejects_new_submissions(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(connection, set_prop_batch_delay=60)
+        session.store.apply_topology(_topology(("light-a", 2, {"p": False})))
+        queued = asyncio.create_task(
+            session.submit_commands(
+                [NodeCommand(id="light-a", nt=2, props={"p": True})],
+                state_targets={"light-a": {"p": True}},
             )
         )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-
-        await state_ref.tell(SyncStartedEvent(reason="manual sync"))
-        await asyncio.sleep(0.01)
-        self.assertFalse(state.has_pending("light-1", ["p"]))
-        self.assertIn("gateway_intent.clear", [snapshot.message["method"] for snapshot in snapshots])
-
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
-        await state_ref.tell(
-            SessionStatusChanged(
-                previous=GatewaySessionState.READY,
-                current=GatewaySessionState.DISCONNECTED,
-                error=RuntimeError("closed"),
-            )
-        )
-        await asyncio.sleep(0)
-        self.assertFalse(state.has_pending("light-1", ["p"]))
-        await state.close()
-
-    async def test_device_state_keeps_intent_on_mismatched_push_and_requests_refresh_on_expiry(self) -> None:
-        state = DeviceStateActor(ttl=0.01)
-        state_ref = ActorRef(state)
-        refreshes: list[str | int] = []
-        refresh_seen = asyncio.Event()
-
-        async def refresh(event: object) -> None:
-            refreshes.append(event.node_id)
-            await state_ref.ask(
-                ApplyPropertiesCommand(
-                    payload={"method": "gateway_get.node", "nodes": [{"id": event.node_id, "params": {"p": False}}]},
-                    reason="node refresh",
-                )
-            )
-            refresh_seen.set()
-
-        state.set_refresh_requester(refresh)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload=_topology(False),
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
-        self.assertEqual(state.visible_node("light-1").params["p"], True)
-
-        await state_ref.ask(
-            ApplyPropertiesCommand(
-                payload={"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": False}}]},
-                reason="property push",
-            )
-        )
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertEqual(state.visible_node("light-1").params["p"], True)
-
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
-        await asyncio.wait_for(refresh_seen.wait(), timeout=1.0)
-        await asyncio.sleep(0)
-        self.assertEqual(len(refreshes), 1)
-        self.assertEqual(refreshes[0], "light-1")
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertIsNot(state.visible_node("light-1").online, False)
-        self.assertEqual(state.visible_node("light-1").params["p"], True)
-        await state.close()
-
-    async def test_device_state_suppresses_mismatched_push_hidden_by_intent(self) -> None:
-        state = DeviceStateActor()
-        state_ref = ActorRef(state)
-        snapshots: list[StateSnapshotChanged] = []
-        state.add_state_listener(snapshots.append)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload=_topology(False),
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
-        await asyncio.sleep(0)
-        snapshots.clear()
-
-        with self.assertLogs("yeelight_pro.session.actors.device_state", level="DEBUG") as logs:
-            await state_ref.ask(
-                ApplyPropertiesCommand(
-                    payload={"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": False}}]},
-                    reason="property push",
-                )
-            )
+        for _ in range(10):
             await asyncio.sleep(0)
+            if session._pending_writes:
+                break
 
-        self.assertEqual(state.state.nodes["light-1"].params["p"], False)
-        self.assertEqual(state.visible_node("light-1").params["p"], True)
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertEqual(snapshots, [])
-        self.assertTrue(any("state snapshot suppressed" in message for message in logs.output))
+        await session.drain_writes()
 
-        await state.close()
-
-    async def test_device_state_refresh_confirm_clears_reconciling_intent(self) -> None:
-        state = DeviceStateActor(ttl=0.01)
-        state_ref = ActorRef(state)
-        refreshes: list[str | int] = []
-
-        async def refresh(event: object) -> None:
-            refreshes.append(event.node_id)
-            await state_ref.ask(
-                ApplyPropertiesCommand(
-                    payload={"method": "gateway_get.node", "nodes": [{"id": event.node_id, "params": {"p": True}}]},
-                    reason="node refresh",
-                )
+        self.assertEqual(await queued, {"result": "ok"})
+        self.assertEqual(session._pending_writes, [])
+        with self.assertRaises(ActorClosed):
+            await session.submit_commands(
+                [NodeCommand(id="light-a", nt=2, props={"p": False})],
+                state_targets={"light-a": {"p": False}},
             )
 
-        state.set_refresh_requester(refresh)
+    async def test_power_off_and_level_commands_are_never_merged(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(connection, set_prop_batch_delay=0.01)
 
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload=_topology(False),
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
+        await asyncio.gather(
+            session.submit_commands(
+                [NodeCommand(id="light-a", nt=2, props={"p": False})],
+                state_targets={"light-a": {"p": False}},
+            ),
+            session.submit_commands(
+                [NodeCommand(id="light-a", nt=2, props={"l": 40})],
+                state_targets={"light-a": {"p": True, "l": 40}},
+            ),
+        )
+
+        writes = [request for request in connection.requests if request.method == "gateway_set.prop"]
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(writes[0].payload["nodes"][0]["set"], {"p": False})  # type: ignore[index]
+        self.assertEqual(writes[1].payload["nodes"][0]["set"], {"l": 40})  # type: ignore[index]
+
+        with self.assertRaises(ValueError):
+            await session.submit_commands(
+                [NodeCommand(id="light-a", nt=2, props={"p": False, "l": 40})],
+                state_targets={"light-a": {"p": False, "l": 40}},
             )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
-        await asyncio.sleep(0.05)
-
-        self.assertEqual(refreshes, ["light-1"])
-        self.assertFalse(state.has_pending("light-1", ["p"]))
-        self.assertIsNot(state.visible_node("light-1").online, False)
-        self.assertEqual(state.visible_node("light-1").params["p"], True)
-        await state.close()
-
-    async def test_device_state_publishes_target_confirmation_for_assumed_state_change(self) -> None:
-        state = DeviceStateActor()
-        state_ref = ActorRef(state)
-        snapshots: list[StateSnapshotChanged] = []
-        state.add_state_listener(snapshots.append)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload=_topology(False),
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}))
-        await asyncio.sleep(0)
-        snapshots.clear()
-
-        await state_ref.ask(
-            ApplyPropertiesCommand(
-                payload={"method": "gateway_post.prop", "nodes": [{"id": "light-1", "params": {"p": True}}]},
-                reason="property push",
-            )
-        )
-        await asyncio.sleep(0)
-
-        self.assertEqual(state.visible_node("light-1").params["p"], True)
-        self.assertFalse(state.has_pending("light-1", ["p"]))
-        self.assertEqual([snapshot.reason for snapshot in snapshots], ["property push"])
-
-        await state.close()
-
-    async def test_device_state_suppresses_group_refresh_hidden_by_intent(self) -> None:
-        state = DeviceStateActor()
-        state_ref = ActorRef(state)
-        snapshots: list[StateSnapshotChanged] = []
-        state.add_state_listener(snapshots.append)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload={
-                    "nodes": [{"id": 265461, "nt": 4, "type": 3, "params": {"p": True}}],
-                    "groups": [{"id": 265461, "nt": 4, "params": {"p": True}}],
-                    "rooms": [],
-                    "scenes": [],
-                },
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({265461: {"p": True}}))
-        await asyncio.sleep(0)
-        snapshots.clear()
-
-        await state_ref.ask(
-            ApplyGroupsCommand(
-                payload={"method": "gateway_get.group", "groups": [{"id": 265461, "nt": 4, "params": {"p": False}}]},
-                reason="node refresh",
-            )
-        )
-        await asyncio.sleep(0)
-
-        self.assertEqual(state.state.groups[265461]["params"]["p"], False)
-        self.assertEqual(state.state.nodes[265461].params["p"], False)
-        self.assertEqual(state.visible_node(265461).params["p"], True)
-        self.assertTrue(state.has_pending(265461, ["p"]))
-        self.assertEqual(snapshots, [])
-
-        await state.close()
-
-    async def test_device_state_empty_refresh_response_keeps_expired_target_stale(self) -> None:
-        state = DeviceStateActor(ttl=0.01)
-        state_ref = ActorRef(state)
-        refreshes: list[str | int] = []
-
-        async def refresh(event: object) -> None:
-            refreshes.append(event.node_id)
-            await state_ref.ask(
-                ApplyPropertiesCommand(
-                    payload={"method": "gateway_get.node", "nodes": []},
-                    reason="node refresh",
-                )
-            )
-
-        state.set_refresh_requester(refresh)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload=_topology(True),
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": False}}))
-        await asyncio.sleep(0.05)
-
-        self.assertEqual(refreshes, ["light-1"])
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertEqual(state.visible_node("light-1").online, False)
-        self.assertEqual(state.visible_node("light-1").params["p"], False)
-        self.assertEqual(state.diagnostics()["stale"], [{"node_id": "light-1", "properties": ["p"]}])
-        await state.close()
-
-    async def test_device_state_ignores_superseded_refresh_response_for_newer_intent(self) -> None:
-        state = DeviceStateActor()
-        state_ref = ActorRef(state)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload=_topology(True),
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        first = await state_ref.ask(PrepareCommandIntentCommand({"light-1": {"p": False}}))
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": False}}, token=first))
-
-        second = await state_ref.ask(PrepareCommandIntentCommand({"light-1": {"p": True}}))
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True}}, token=second))
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-        await state_ref.ask(
-            ApplyPropertiesCommand(
-                payload={"method": "gateway_get.node", "nodes": [{"id": "light-1", "params": {"p": True}}]},
-                reason="node refresh",
-                request_generations=first.by_node(),
-            )
-        )
-
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertEqual(state.visible_node("light-1").params["p"], True)
-        self.assertEqual(state.diagnostics()["stale"], [])
-        await state.close()
-
-    async def test_device_state_expiry_keeps_visible_target_after_refresh_fails(self) -> None:
-        state = DeviceStateActor(ttl=0.01)
-        state_ref = ActorRef(state)
-        snapshots: list[StateSnapshotChanged] = []
-        refreshes: list[str | int] = []
-        state.add_state_listener(snapshots.append)
-        refresh_started = asyncio.Event()
-        refresh_failed = asyncio.get_running_loop().create_future()
-
-        async def fail_refresh(event: object) -> None:
-            refreshes.append(event.node_id)
-            refresh_started.set()
-            await refresh_failed
-
-        state.set_refresh_requester(fail_refresh)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload=_topology(True),
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": False}}))
-        self.assertEqual(state.visible_node("light-1").params["p"], False)
-
-        snapshots.clear()
-        await asyncio.wait_for(refresh_started.wait(), timeout=1.0)
-
-        self.assertEqual(refreshes, ["light-1"])
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertIsNot(state.visible_node("light-1").online, False)
-        self.assertNotIn("gateway_intent.expired", [snapshot.message["method"] for snapshot in snapshots])
-
-        refresh_failed.set_exception(RuntimeError("refresh failed"))
-        await asyncio.sleep(0.01)
-
-        self.assertTrue(state.has_pending("light-1", ["p"]))
-        self.assertEqual(state.visible_node("light-1").online, False)
-        self.assertEqual(state.visible_node("light-1").params["p"], False)
-        self.assertIn("gateway_intent.expired", [snapshot.message["method"] for snapshot in snapshots])
-
-        await state_ref.ask(
-            ApplyPropertiesCommand(
-                payload={"method": "gateway_get.node", "nodes": [{"id": "light-1", "params": {"p": True}}]},
-                reason="node refresh",
-            )
-        )
-        self.assertIsNot(state.visible_node("light-1").online, False)
-        self.assertEqual(state.visible_node("light-1").params["p"], True)
-        await state.close()
-
-    async def test_device_state_group_refresh_clears_stale_mesh_group_node(self) -> None:
-        state = DeviceStateActor(ttl=0.01)
-        state_ref = ActorRef(state)
-        refreshes: list[tuple[str | int, int | None]] = []
-        state.set_refresh_requester(lambda event: refreshes.append((event.node_id, event.node_type)))
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload={
-                    "nodes": [{"id": 265461, "nt": 4, "type": 3, "params": {"p": False, "l": 20}}],
-                    "groups": [{"id": 265461, "nt": 4, "params": {"p": False, "l": 20}}],
-                    "rooms": [],
-                    "scenes": [],
-                },
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({265461: {"p": True}}))
-        self.assertEqual(state.visible_node(265461).params["p"], True)
-
-        await asyncio.sleep(0.05)
-
-        self.assertEqual(refreshes, [(265461, 4)])
-        self.assertTrue(state.has_pending(265461, ["p"]))
-        self.assertEqual(state.visible_node(265461).online, False)
-        self.assertEqual(state.visible_node(265461).params["p"], True)
-
-        await state_ref.ask(
-            ApplyGroupsCommand(
-                payload={"method": "gateway_get.group", "groups": [{"id": 265461, "nt": 4, "params": {"p": False}}]},
-                reason="node refresh",
-            )
-        )
-        self.assertFalse(state.has_pending(265461, ["p"]))
-        self.assertIsNot(state.visible_node(265461).online, False)
-        self.assertEqual(state.visible_node(265461).params["p"], False)
-        await state.close()
-
-    async def test_device_state_group_refresh_payload_clears_refreshing_without_stale(self) -> None:
-        state = DeviceStateActor(ttl=0.01)
-        state_ref = ActorRef(state)
-        refreshes: list[tuple[str | int, int | None]] = []
-
-        async def refresh_group(event: object) -> None:
-            refreshes.append((event.node_id, event.node_type))
-            await state_ref.ask(
-                ApplyGroupsCommand(
-                    payload={
-                        "method": "gateway_get.group",
-                        "groups": [{"id": event.node_id, "nt": 4, "params": {"p": False}}],
-                    },
-                    reason="node refresh",
-                )
-            )
-
-        state.set_refresh_requester(refresh_group)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload={
-                    "nodes": [{"id": 265461, "nt": 4, "type": 3, "params": {"p": True}}],
-                    "groups": [{"id": 265461, "nt": 4, "params": {"p": True}}],
-                    "rooms": [],
-                    "scenes": [],
-                },
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({265461: {"p": False}}))
-        await asyncio.sleep(0.05)
-
-        self.assertEqual(refreshes, [(265461, 4)])
-        diagnostics = state.diagnostics()
-        self.assertEqual(diagnostics["stale"], [])
-        self.assertEqual(diagnostics["refreshing"], [])
-        self.assertIsNot(state.visible_node(265461).online, False)
-        self.assertEqual(state.visible_node(265461).params["p"], False)
-        await state.close()
-
-    async def test_device_state_expiry_keeps_partial_refresh_property_granularity(self) -> None:
-        state = DeviceStateActor(ttl=0.01)
-        state_ref = ActorRef(state)
-
-        async def partial_refresh(event: object) -> None:
-            await state_ref.ask(
-                ApplyPropertiesCommand(
-                    payload={"method": "gateway_get.node", "nodes": [{"id": event.node_id, "params": {"p": False}}]},
-                    reason="node refresh",
-                )
-            )
-
-        state.set_refresh_requester(partial_refresh)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload={
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": True, "l": 10}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                },
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": False, "l": 80}}))
-        await asyncio.sleep(0.05)
-
-        diagnostics = state.diagnostics()
-        self.assertEqual(diagnostics["stale"], [{"node_id": "light-1", "properties": ["l"]}])
-        self.assertEqual(diagnostics["refreshing"], [])
-        await state.close()
-
-    async def test_device_state_masks_transition_intermediate_values_until_targets_confirm(self) -> None:
-        state = DeviceStateActor()
-        state_ref = ActorRef(state)
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload={
-                    "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": False, "l": 10, "ct": 2700}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                },
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(RecordCommandIntentCommand({"light-1": {"p": True, "l": 80, "ct": 4000}}))
-
-        await state_ref.ask(
-            ApplyPropertiesCommand(
-                payload={
-                    "method": "gateway_post.prop",
-                    "nodes": [{"id": "light-1", "params": {"p": True, "l": 20, "ct": 3000}}],
-                },
-                reason="property push",
-            )
-        )
-        visible = state.visible_node("light-1")
-        self.assertEqual(visible.params["p"], True)
-        self.assertEqual(visible.params["l"], 80)
-        self.assertEqual(visible.params["ct"], 4000)
-        self.assertFalse(state.has_pending("light-1", ["p"]))
-        self.assertTrue(state.has_pending("light-1", ["l", "ct"]))
-
-        await state_ref.ask(
-            ApplyPropertiesCommand(
-                payload={
-                    "method": "gateway_post.prop",
-                    "nodes": [{"id": "light-1", "params": {"l": 80, "ct": 4000}}],
-                },
-                reason="property push",
-            )
-        )
-        self.assertFalse(state.has_pending("light-1", ["p", "l", "ct"]))
-        self.assertEqual(state.visible_node("light-1").params["l"], 80)
-        self.assertEqual(state.visible_node("light-1").params["ct"], 4000)
-        await state.close()
-
-    async def test_device_state_tracks_motor_target_push_stop_disconnect_and_expiry(self) -> None:
-        state = DeviceStateActor(motor_tracking_ttl=0.02)
-        state_ref = ActorRef(state)
-        refreshes: list[str | int] = []
-        state.set_refresh_requester(lambda event: refreshes.append(event.node_id))
-
-        await state_ref.ask(
-            ApplyTopologyCommand(
-                payload={
-                    "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 20, "tp": 20}}],
-                    "groups": [],
-                    "rooms": [],
-                    "scenes": [],
-                },
-                reason="topology sync",
-                message={"method": "gateway_sync.topology"},
-            )
-        )
-        await state_ref.ask(
-            RecordCommandIntentCommand({}, motor_targets=(MotorTargetIntent("curtain-1", "cp", "tp", 80),))
-        )
-        visible = state.visible_node("curtain-1")
-        self.assertEqual(visible.params["cp"], 20)
-        self.assertEqual(visible.params[MOTOR_TRACKING_TARGET_POSITION], 80)
-        self.assertEqual(visible.params[MOTOR_TRACKING_POSITION_MOTION], "opening")
-
-        await state_ref.ask(
-            ApplyPropertiesCommand(
-                payload={"method": "gateway_post.prop", "nodes": [{"id": "curtain-1", "params": {"cp": 45}}]},
-                reason="property push",
-            )
-        )
-        visible = state.visible_node("curtain-1")
-        self.assertEqual(visible.params["cp"], 45)
-        self.assertEqual(visible.params[MOTOR_TRACKING_TARGET_POSITION], 80)
-
-        await state_ref.ask(
-            ApplyPropertiesCommand(
-                payload={"method": "gateway_post.prop", "nodes": [{"id": "curtain-1", "params": {"cp": 80}}]},
-                reason="property push",
-            )
-        )
-        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
-
-        await state_ref.ask(
-            RecordCommandIntentCommand({}, motor_targets=(MotorTargetIntent("curtain-1", "cp", "tp", 10),))
-        )
-        await state_ref.ask(RecordCommandIntentCommand({}, motor_stops=("curtain-1",)))
-        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
-
-        await state_ref.ask(
-            RecordCommandIntentCommand({}, motor_targets=(MotorTargetIntent("curtain-1", "cp", "tp", 10),))
-        )
-        await state_ref.tell(
-            SessionStatusChanged(
-                previous=GatewaySessionState.READY,
-                current=GatewaySessionState.DISCONNECTED,
-                error=RuntimeError("closed"),
-            )
-        )
-        await asyncio.sleep(0)
-        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
-
-        await state_ref.ask(
-            RecordCommandIntentCommand({}, motor_targets=(MotorTargetIntent("curtain-1", "cp", "tp", 10),))
-        )
-        await asyncio.sleep(0.05)
-        self.assertEqual(refreshes, ["curtain-1"])
-        self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, state.visible_node("curtain-1").params)
-        await state.close()
-
-
-def _topology(power: bool) -> dict[str, object]:
-    return {
-        "nodes": [{"id": "light-1", "nt": 2, "type": 3, "params": {"p": power}}],
-        "groups": [],
-        "rooms": [],
-        "scenes": [],
-    }
-
-
-if __name__ == "__main__":
-    unittest.main()

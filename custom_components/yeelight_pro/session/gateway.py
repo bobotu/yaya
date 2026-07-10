@@ -1,53 +1,33 @@
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import inspect
-import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, TypeAlias
+from typing import Any
 
-from ..core.coercion import int_or_none as _int_or_none
-from ..core.coercion import node_key as _node_key
 from ..core.commands import MotorAction, NodeCommand, NodeSet, motor_adjust_action
 from ..core.const import DEFAULT_MESH_NODE_TYPE, GATEWAY_CONTROL_PORT
 from ..core.devices.base import Device
 from ..core.devices.factory import create_device
 from ..core.events import GatewayEvent, iter_gateway_events
-from ..core.exceptions import ProtocolError
 from ..core.protocol import GatewayMethod
-from ..core.topology import TopologyNode
+from ..core.topology import NodeId, TopologyNode
 from ..core.updates import PropertyChange
-from .actors import Actor, ActorClosed, ActorRef, ConnectionActor, DeviceStateActor, SessionActor, create_actor_task
+from .actors import ActorRef, ConnectionActor
 from .messages import (
     CloseConnectionCommand,
-    ConfigureAutoSyncCommand,
-    ConnectSessionCommand,
-    DisableAutoSyncCommand,
     FullSyncSource,
     GatewayEventReceived,
     GatewayRpcRequest,
-    PrepareCommandIntentCommand,
-    RecordCommandIntentCommand,
-    RefreshNodeCommand,
-    RefreshNodeRequestedEvent,
     SessionEvent,
-    SetSessionStateCommand,
     StartConnectionCommand,
     StateSnapshotChanged,
-    SyncSessionCommand,
 )
-from .model import (
-    COMMAND_INTENT_TTL,
-    MOTOR_CURRENT_ANGLE_PROP,
-    MOTOR_CURRENT_POSITION_PROP,
-    MOTOR_TARGET_ANGLE_PROP,
-    MOTOR_TARGET_POSITION_PROP,
-    CommandIntentToken,
-    GatewaySessionState,
-    MotorTargetIntent,
+from .model import MOTOR_TRACKING_TTL, GatewaySessionState
+from .runtime import (
+    DEFAULT_STATE_DEADLINE,
+    DEFAULT_STATE_READBACK_DELAY,
+    GatewaySession,
 )
 from .transport import GatewayRPC
 
@@ -57,11 +37,10 @@ EventListener = Callable[[GatewayEvent], Awaitable[None] | None]
 PropertyListener = Callable[[PropertyChange], Awaitable[None] | None]
 StateListener = Callable[[StateSnapshotChanged], Awaitable[None] | None]
 SessionListener = Callable[[SessionEvent], Awaitable[None] | None]
-_LOGGER = logging.getLogger(__name__)
 
 
 class YeelightProGateway:
-    """Public gateway facade over transport, session, and device-state actors."""
+    """Public facade over the gateway connection and serialized session runtime."""
 
     def __init__(
         self,
@@ -70,8 +49,10 @@ class YeelightProGateway:
         port: int = GATEWAY_CONTROL_PORT,
         request_timeout: float = 5.0,
         reconnect_delay: float = 2.0,
-        command_intent_ttl: float = COMMAND_INTENT_TTL,
         set_prop_batch_delay: float = 0.01,
+        state_readback_delay: float = DEFAULT_STATE_READBACK_DELAY,
+        state_deadline: float = DEFAULT_STATE_DEADLINE,
+        motor_tracking_ttl: float = MOTOR_TRACKING_TTL,
         rpc: GatewayRPC | None = None,
     ) -> None:
         self._rpc = rpc or GatewayRPC(
@@ -83,15 +64,15 @@ class YeelightProGateway:
         self._connection = ConnectionActor(self._rpc)
         self._connection_ref = ActorRef(self._connection)
         self._connection.bind_push_listener(self._connection_ref)
-        self._state_actor = DeviceStateActor(ttl=command_intent_ttl, refresh_timeout=request_timeout)
-        self._state_ref = ActorRef(self._state_actor)
-        self._session = SessionActor(connection_ref=self._connection_ref, device_state_ref=self._state_ref)
-        self._session_ref = ActorRef(self._session)
-        self._connection.set_session_sink(self._session_ref.tell)
-        self._state_actor.set_refresh_requester(self._handle_refresh_requested)
-        self.state = self._state_actor.state
-        self.command_intent_ttl = command_intent_ttl
-        self._set_prop_batcher = _SetPropBatcher(self, delay=set_prop_batch_delay)
+        self._session = GatewaySession(
+            connection_ref=self._connection_ref,
+            set_prop_batch_delay=set_prop_batch_delay,
+            state_readback_delay=state_readback_delay,
+            state_deadline=state_deadline,
+            motor_tracking_ttl=motor_tracking_ttl,
+        )
+        self._connection.set_session_sink(self._session.ref.tell)
+        self.state = self._session.store
 
     async def __aenter__(self) -> YeelightProGateway:
         await self.connect()
@@ -135,12 +116,10 @@ class YeelightProGateway:
         include_rooms: bool = False,
         include_scenes: bool = False,
     ) -> None:
-        await self._session_ref.ask(
-            ConfigureAutoSyncCommand(
-                include_groups=include_groups,
-                include_rooms=include_rooms,
-                include_scenes=include_scenes,
-            )
+        await self._session.configure_auto_sync(
+            include_groups=include_groups,
+            include_rooms=include_rooms,
+            include_scenes=include_scenes,
         )
         await self._connection_ref.ask(StartConnectionCommand(connection_ref=self._connection_ref))
         await self._session.wait_ready()
@@ -149,23 +128,25 @@ class YeelightProGateway:
         await self.close()
 
     async def connect(self) -> None:
-        await self._session_ref.ask(DisableAutoSyncCommand())
-        await self._session_ref.ask(ConnectSessionCommand())
+        await self._session.disable_auto_sync()
+        await self._session.connect()
 
     async def reconnect(self) -> None:
-        await self._session_ref.ask(ConnectSessionCommand())
+        await self._session.connect()
 
     async def close(self) -> None:
-        await self._set_prop_batcher.close()
-        await self._session_ref.ask(DisableAutoSyncCommand())
-        await self._session_ref.ask(SetSessionStateCommand(GatewaySessionState.CLOSING))
+        if self._session.closed:
+            return
+        await self._session.drain_writes()
+        await self._session.disable_auto_sync()
+        await self._session.set_session_state(GatewaySessionState.CLOSING)
         await self._connection_ref.ask(CloseConnectionCommand())
         await self._connection.shutdown()
-        await self._session_ref.ask(
-            SetSessionStateCommand(GatewaySessionState.DISCONNECTED, self._connection.last_disconnect_error)
+        await self._session.set_session_state(
+            GatewaySessionState.DISCONNECTED,
+            self._connection.last_disconnect_error,
         )
         await self._session.close()
-        await self._state_actor.close()
 
     async def wait_closed(self) -> None:
         await self._connection.wait_closed()
@@ -177,14 +158,11 @@ class YeelightProGateway:
         include_rooms: bool = False,
         include_scenes: bool = False,
     ) -> None:
-        waiter = await self._session_ref.ask(
-            SyncSessionCommand(
-                include_groups=include_groups,
-                include_rooms=include_rooms,
-                include_scenes=include_scenes,
-            )
+        await self._session.sync(
+            include_groups=include_groups,
+            include_rooms=include_rooms,
+            include_scenes=include_scenes,
         )
-        await waiter
 
     async def request(
         self,
@@ -201,87 +179,31 @@ class YeelightProGateway:
     async def get_topology(self) -> JSONDict:
         return await self.request(GatewayMethod.GET_TOPOLOGY)
 
-    async def get_node(self, node_id: str | int) -> JSONDict:
+    async def get_node(self, node_id: NodeId) -> JSONDict:
         return await self.request(GatewayMethod.GET_NODE, _id_payload(node_id))
 
     async def get_all_nodes(self) -> JSONDict:
         return await self.request(GatewayMethod.GET_NODE, _id_payload(0))
 
-    async def refresh_node(self, node_id: str | int) -> JSONDict:
-        node = self.state.nodes.get(node_id)
-        return await self._session_ref.ask(
-            RefreshNodeCommand(node_id=node_id, node_type=node.nt if node is not None else None)
-        )
+    async def readback_node(self, node_id: NodeId) -> JSONDict:
+        return await self._session.read_node(node_id)
 
-    async def get_group(self, group_id: str | int | None = 0) -> JSONDict:
+    async def get_group(self, group_id: NodeId | None = 0) -> JSONDict:
         return await self.request(GatewayMethod.GET_GROUP, _id_payload(group_id))
 
-    async def get_room(self, room_id: str | int | None = 0) -> JSONDict:
+    async def get_room(self, room_id: NodeId | None = 0) -> JSONDict:
         return await self.request(GatewayMethod.GET_ROOM, _id_payload(room_id))
 
-    async def get_scene(self, scene_id: str | int | None = 0) -> JSONDict:
+    async def get_scene(self, scene_id: NodeId | None = 0) -> JSONDict:
         return await self.request(GatewayMethod.GET_SCENE, _id_payload(scene_id))
 
     async def _send_node_commands(
         self,
         commands: Iterable[NodeCommand | NodeSet],
         *,
-        intent_props_by_node: Mapping[str | int, Mapping[str, Any]] | None = None,
+        state_targets_by_node: Mapping[NodeId, Mapping[str, Any]] | None = None,
     ) -> JSONDict:
-        commands = tuple(commands)
-        if not commands:
-            raise ValueError("_send_node_commands requires at least one node command")
-
-        _LOGGER.debug(
-            "Yeelight Pro enqueue node commands: commands=%s intents=%s",
-            _commands_summary(commands),
-            _intent_props_summary(intent_props_by_node),
-        )
-        return await self._set_prop_batcher.submit(commands, intent_props_by_node)
-
-    async def _send_node_command_batch(self, requests: tuple[_PendingSetPropRequest, ...]) -> JSONDict:
-        commands: list[NodeCommand | NodeSet] = []
-        intent_props_by_node: dict[str | int, dict[str, Any]] = {}
-        intent_tokens: list[CommandIntentToken] = []
-        for request in requests:
-            commands.extend(request.commands)
-            if request.intent_props_by_node is None:
-                continue
-            for node_id, props in request.intent_props_by_node.items():
-                intent_props_by_node.setdefault(node_id, {}).update(dict(props))
-            if request.intent_token is not None:
-                intent_tokens.append(request.intent_token)
-
-        payload = _batched_payload_from_commands(commands)
-        batch_ids = tuple(request.request_id for request in requests)
-        _LOGGER.debug(
-            "Yeelight Pro sending set_prop batch: batch_requests=%s payload=%s intents=%s",
-            batch_ids,
-            _node_payload_summary(payload),
-            _intent_props_summary(intent_props_by_node),
-        )
-        response = await self.request(GatewayMethod.SET_PROP, {"nodes": payload})
-        _LOGGER.debug(
-            "Yeelight Pro set_prop batch ACK: batch_requests=%s response=%s",
-            batch_ids,
-            _response_summary(response),
-        )
-        _raise_for_missing_write_ack(GatewayMethod.SET_PROP, response)
-        targets, stops = _motor_tracking_from_payload(payload)
-        if intent_props_by_node:
-            await self._record_command_intents(
-                intent_props_by_node,
-                motor_targets=tuple(targets),
-                motor_stops=tuple(stops),
-                token=_merge_intent_tokens(intent_tokens),
-            )
-        elif targets or stops:
-            await self._record_command_intents(
-                {},
-                motor_targets=tuple(targets),
-                motor_stops=tuple(stops),
-            )
-        return response
+        return await self._session.submit_commands(commands, state_targets=state_targets_by_node)
 
     async def set_scenes(self, scenes: Iterable[Mapping[str, Any]]) -> JSONDict:
         payload = [dict(scene) for scene in scenes]
@@ -299,29 +221,29 @@ class YeelightProGateway:
         self,
         command: NodeCommand | NodeSet,
         *,
-        intent_props: Mapping[str, Any] | None = None,
+        state_targets: Mapping[str, Any] | None = None,
     ) -> JSONDict:
-        intent_props_by_node = {command.id: intent_props} if intent_props else None
-        return await self._send_node_commands([command], intent_props_by_node=intent_props_by_node)
+        targets_by_node = {command.id: state_targets} if state_targets else None
+        return await self._send_node_commands([command], state_targets_by_node=targets_by_node)
 
     async def set_node_props(
         self,
-        node_id: str | int,
+        node_id: NodeId,
         props: Mapping[str, Any],
         *,
         nt: int = DEFAULT_MESH_NODE_TYPE,
         duration: int | None = None,
-        intent_props: Mapping[str, Any] | None = None,
+        state_targets: Mapping[str, Any] | None = None,
     ) -> JSONDict:
-        intent_props_by_node = {node_id: intent_props} if intent_props else None
+        targets_by_node = {node_id: state_targets} if state_targets else None
         return await self._send_node_commands(
             [NodeCommand(id=node_id, nt=nt, props=props, duration=duration)],
-            intent_props_by_node=intent_props_by_node,
+            state_targets_by_node=targets_by_node,
         )
 
     async def motor_adjust(
         self,
-        node_id: str | int,
+        node_id: NodeId,
         action_type: MotorAction | str,
         *,
         nt: int = DEFAULT_MESH_NODE_TYPE,
@@ -330,7 +252,7 @@ class YeelightProGateway:
 
     async def set_curtain_position(
         self,
-        node_id: str | int,
+        node_id: NodeId,
         position: int,
         *,
         nt: int = DEFAULT_MESH_NODE_TYPE,
@@ -339,46 +261,44 @@ class YeelightProGateway:
         _validate_range("position", position, 0, 100)
         return await self.set_node_props(node_id, {"tp": position}, nt=nt, duration=duration)
 
-    async def stop_curtain(self, node_id: str | int, *, nt: int = DEFAULT_MESH_NODE_TYPE) -> JSONDict:
+    async def stop_curtain(self, node_id: NodeId, *, nt: int = DEFAULT_MESH_NODE_TYPE) -> JSONDict:
         return await self.motor_adjust(node_id, MotorAction.PAUSE, nt=nt)
 
-    def device(self, node_id: str | int) -> Device | None:
-        snapshot = self.state.nodes.get(node_id)
-        if snapshot is None:
-            return None
-        return create_device(snapshot, self)
+    def device(self, node_id: NodeId) -> Device | None:
+        snapshot = self.visible_node(node_id)
+        return None if snapshot is None else create_device(snapshot, self)
 
     def devices(self) -> list[Device]:
-        return [create_device(snapshot, self) for snapshot in self.state.nodes.values()]
+        return [create_device(snapshot, self) for snapshot in self.visible_nodes()]
 
-    def visible_node(self, node_id: str | int) -> TopologyNode | None:
-        return self._state_actor.visible_node(node_id)
+    def visible_node(self, node_id: NodeId) -> TopologyNode | None:
+        return self._session.visible_node(node_id)
 
     def visible_nodes(self) -> list[TopologyNode]:
-        return self._state_actor.visible_nodes()
+        return self._session.visible_nodes()
 
-    def has_pending_intent(self, node_id: str | int, props: Iterable[str] | None = None) -> bool:
-        return self._state_actor.has_pending(node_id, props)
+    def has_pending_write(self, node_id: NodeId, props: Iterable[str] | None = None) -> bool:
+        return self._session.has_pending_write(node_id, props)
 
-    def intent_diagnostics(self) -> dict[str, Any]:
-        return self._state_actor.diagnostics()
+    def write_diagnostics(self) -> dict[str, Any]:
+        return self._session.write_diagnostics()
 
     def motor_tracking_diagnostics(self) -> dict[str, Any]:
-        return self._state_actor.motor_diagnostics()
+        return self._session.motor_diagnostics()
 
     def add_event_listener(self, listener: EventListener) -> Callable[[], None]:
         return self._session.add_gateway_event_listener(_wrap_gateway_event_listener(listener))
 
     def add_property_listener(self, listener: PropertyListener) -> Callable[[], None]:
-        return self._state_actor.add_property_listener(_wrap_property_listener(listener))
+        return self._session.add_property_listener(listener)
 
     def add_state_listener(self, listener: StateListener) -> Callable[[], None]:
-        return self._state_actor.add_state_listener(listener)
+        return self._session.add_state_listener(listener)
 
     def add_session_listener(self, listener: SessionListener) -> Callable[[], None]:
         removers = [
             self._session.add_status_listener(_wrap_session_listener(listener)),
-            self._state_actor.add_state_listener(_wrap_session_listener(listener)),
+            self._session.add_state_listener(_wrap_session_listener(listener)),
             self._session.add_gateway_event_listener(_wrap_session_listener(listener)),
         ]
 
@@ -392,245 +312,10 @@ class YeelightProGateway:
     def events_from_message(message: Mapping[str, Any]) -> list[GatewayEvent]:
         return list(iter_gateway_events(message))
 
-    async def _record_command_intents(
-        self,
-        props_by_node: Mapping[str | int, Mapping[str, Any]],
-        *,
-        motor_targets: tuple[MotorTargetIntent, ...] = (),
-        motor_stops: tuple[str | int, ...] = (),
-        token: CommandIntentToken | None = None,
-    ) -> None:
-        _LOGGER.debug(
-            "Yeelight Pro record command intents: props=%s motor_targets=%s motor_stops=%s",
-            _intent_props_summary(props_by_node),
-            _motor_targets_summary(motor_targets),
-            tuple(str(node_id) for node_id in motor_stops),
-        )
-        await self._state_ref.ask(
-            RecordCommandIntentCommand(
-                props_by_node=props_by_node,
-                motor_targets=motor_targets,
-                motor_stops=motor_stops,
-                token=token,
-            )
-        )
-
-    async def _handle_refresh_requested(self, event: RefreshNodeRequestedEvent) -> None:
-        _LOGGER.debug(
-            "Yeelight Pro refresh requested after intent expiry: node_id=%s node_type=%s",
-            event.node_id,
-            event.node_type,
-        )
-        await self._session_ref.ask(
-            RefreshNodeCommand(
-                node_id=event.node_id,
-                node_type=event.node_type,
-                request_generations=event.request_generations,
-            )
-        )
-
-    async def _prepare_command_intents(
-        self,
-        props_by_node: Mapping[str | int, Mapping[str, Any]],
-    ) -> CommandIntentToken:
-        return await self._state_ref.ask(PrepareCommandIntentCommand(props_by_node=props_by_node))
-
-
-@dataclass(frozen=True)
-class _PendingSetPropRequest:
-    request_id: int
-    commands: tuple[NodeCommand | NodeSet, ...]
-    intent_props_by_node: Mapping[str | int, Mapping[str, Any]] | None
-    future: asyncio.Future[JSONDict]
-    intent_token: CommandIntentToken | None = None
-
-
-@dataclass(frozen=True)
-class _FlushSetPropBatch:
-    pass
-
-
-@dataclass(frozen=True)
-class _DrainSetPropBatcher:
-    pass
-
-
-_SetPropBatcherMessage: TypeAlias = _PendingSetPropRequest | _FlushSetPropBatch | _DrainSetPropBatcher
-
-
-class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
-    def __init__(self, gateway: YeelightProGateway, *, delay: float) -> None:
-        super().__init__("yeelight-pro-set-prop-batcher")
-        self._gateway = gateway
-        self._ref: ActorRef[_SetPropBatcherMessage] = ActorRef(self)
-        self._delay = max(0.0, delay)
-        self._pending: list[_PendingSetPropRequest] = []
-        self._flush_task: asyncio.Task[None] | None = None
-        self._send_tail: asyncio.Task[None] | None = None
-        self._closing = False
-        self._next_request_id = 0
-        self._next_batch_id = 0
-
-    async def submit(
-        self,
-        commands: tuple[NodeCommand | NodeSet, ...],
-        intent_props_by_node: Mapping[str | int, Mapping[str, Any]] | None,
-    ) -> JSONDict:
-        if self._closing or self.closed:
-            raise ActorClosed("set_prop batcher is closed")
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[JSONDict] = loop.create_future()
-        self._next_request_id += 1
-        request_id = self._next_request_id
-        _LOGGER.debug(
-            "Yeelight Pro set_prop batcher submit: request=%s commands=%s intents=%s",
-            request_id,
-            _commands_summary(commands),
-            _intent_props_summary(intent_props_by_node),
-        )
-        await self._ref.ask(
-            _PendingSetPropRequest(
-                request_id=request_id,
-                commands=commands,
-                intent_props_by_node=intent_props_by_node,
-                future=future,
-            )
-        )
-        return await future
-
-    async def close(self) -> None:
-        if self.closed:
-            return
-        self._closing = True
-        try:
-            await self._ref.ask(_DrainSetPropBatcher())
-        finally:
-            await super().close()
-
-    async def handle(self, message: _SetPropBatcherMessage) -> None:
-        if isinstance(message, _PendingSetPropRequest):
-            await self._submit(message)
-            return
-        if isinstance(message, _FlushSetPropBatch):
-            self._flush_pending()
-            return
-        if isinstance(message, _DrainSetPropBatcher):
-            await self._drain()
-            return
-        raise TypeError(f"unsupported set_prop batcher message: {type(message).__name__}")
-
-    async def _submit(self, request: _PendingSetPropRequest) -> None:
-        if self._closing:
-            if not request.future.done():
-                request.future.set_exception(ActorClosed("set_prop batcher is closed"))
-            _LOGGER.debug("Yeelight Pro set_prop batcher rejected after close: request=%s", request.request_id)
-            return
-        if self._pending and _batch_conflicts(self._pending, request):
-            _LOGGER.debug(
-                "Yeelight Pro set_prop batcher conflict flush: pending=%s incoming=%s",
-                tuple(item.request_id for item in self._pending),
-                request.request_id,
-            )
-            self._flush_pending()
-        try:
-            intent_token = await _maybe_prepare_command_intents(self._gateway, request.intent_props_by_node)
-        except Exception as exc:  # noqa: BLE001 - preparation failure rejects the write before enqueue.
-            if not request.future.done():
-                request.future.set_exception(exc)
-            return
-        self._pending.append(replace(request, intent_token=intent_token))
-        _LOGGER.debug(
-            "Yeelight Pro set_prop batcher queued: request=%s pending=%s",
-            request.request_id,
-            tuple(item.request_id for item in self._pending),
-        )
-        await self._schedule_flush()
-
-    async def _schedule_flush(self) -> None:
-        if self._flush_task is not None and not self._flush_task.done():
-            return
-        if self._delay == 0:
-            await self.defer(_FlushSetPropBatch())
-            return
-        self._flush_task = self.defer_later(
-            self._delay,
-            _FlushSetPropBatch(),
-            name="yeelight-pro-set-prop-batcher-flush",
-        )
-
-    async def _drain(self) -> None:
-        self._flush_pending()
-        if self._send_tail is not None:
-            await self._send_tail
-
-    def _flush_pending(self) -> None:
-        if self._flush_task is not None and not self._flush_task.done():
-            self._flush_task.cancel()
-        self._flush_task = None
-        if not self._pending:
-            return
-        requests = tuple(self._pending)
-        self._pending.clear()
-        self._next_batch_id += 1
-        batch_id = self._next_batch_id
-        previous = self._send_tail if self._send_tail is not None and not self._send_tail.done() else None
-        _LOGGER.debug(
-            "Yeelight Pro set_prop batcher flush: batch=%s requests=%s wait_previous=%s",
-            batch_id,
-            tuple(request.request_id for request in requests),
-            previous is not None,
-        )
-        task = create_actor_task(
-            self._send_batch_after(previous, batch_id, requests),
-            name="yeelight-pro-set-prop-batch-send",
-        )
-        self._send_tail = task
-
-    async def _send_batch_after(
-        self,
-        previous: asyncio.Task[None] | None,
-        batch_id: int,
-        requests: tuple[_PendingSetPropRequest, ...],
-    ) -> None:
-        if previous is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await previous
-        await self._send_batch(batch_id, requests)
-
-    async def _send_batch(self, batch_id: int, requests: tuple[_PendingSetPropRequest, ...]) -> None:
-        try:
-            response = await self._gateway._send_node_command_batch(requests)
-        except Exception as exc:  # noqa: BLE001 - propagate RPC failure to every original caller.
-            _LOGGER.debug(
-                "Yeelight Pro set_prop batcher failed: batch=%s requests=%s error=%s",
-                batch_id,
-                tuple(request.request_id for request in requests),
-                repr(exc),
-            )
-            for request in requests:
-                if not request.future.done():
-                    request.future.set_exception(exc)
-            return
-        _LOGGER.debug(
-            "Yeelight Pro set_prop batcher resolved: batch=%s requests=%s",
-            batch_id,
-            tuple(request.request_id for request in requests),
-        )
-        for request in requests:
-            if not request.future.done():
-                request.future.set_result(response)
-
 
 def _wrap_gateway_event_listener(listener: EventListener) -> Callable[[GatewayEventReceived], Awaitable[None]]:
     async def _wrapped(event: GatewayEventReceived) -> None:
         await _call_listener(listener, event.event)
-
-    return _wrapped
-
-
-def _wrap_property_listener(listener: PropertyListener) -> Callable[[PropertyChange], Awaitable[None]]:
-    async def _wrapped(change: PropertyChange) -> None:
-        await _call_listener(listener, change)
 
     return _wrapped
 
@@ -653,185 +338,7 @@ def _validate_range(name: str, value: int, minimum: int, maximum: int) -> None:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
 
 
-def _id_payload(item_id: str | int | None) -> Mapping[str, Any] | None:
+def _id_payload(item_id: NodeId | None) -> Mapping[str, Any] | None:
     if item_id is None:
         return None
     return {"params": {"id": item_id}}
-
-
-def _motor_tracking_from_payload(
-    payload: Iterable[Mapping[str, Any]],
-) -> tuple[list[MotorTargetIntent], list[str | int]]:
-    targets: list[MotorTargetIntent] = []
-    stops: list[str | int] = []
-    for item in payload:
-        node_id = item.get("id")
-        if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
-            continue
-        props = item.get("set")
-        if isinstance(props, Mapping):
-            position = _int_or_none(props.get(MOTOR_TARGET_POSITION_PROP))
-            if position is not None:
-                targets.append(
-                    MotorTargetIntent(
-                        node_id=node_id,
-                        current_prop=MOTOR_CURRENT_POSITION_PROP,
-                        target_prop=MOTOR_TARGET_POSITION_PROP,
-                        target_value=position,
-                    )
-                )
-            angle = _int_or_none(props.get(MOTOR_TARGET_ANGLE_PROP))
-            if angle is not None:
-                targets.append(
-                    MotorTargetIntent(
-                        node_id=node_id,
-                        current_prop=MOTOR_CURRENT_ANGLE_PROP,
-                        target_prop=MOTOR_TARGET_ANGLE_PROP,
-                        target_value=angle,
-                    )
-                )
-        action = item.get("action")
-        if _is_motor_pause(action):
-            stops.append(node_id)
-    return targets, stops
-
-
-def _batched_payload_from_commands(commands: Iterable[NodeCommand | NodeSet]) -> list[dict[str, Any]]:
-    payloads: list[dict[str, Any]] = []
-    merged: dict[tuple[str, Any, Any, Any, Any], dict[str, Any]] = {}
-    for command in commands:
-        payload = command.to_payload()
-        node_key = _node_key(payload.get("id"))
-        props = payload.get("set")
-        if node_key is None or not isinstance(props, Mapping) or not _is_mergeable_set_payload(payload):
-            payloads.append(payload)
-            continue
-        key = (
-            node_key,
-            payload.get("nt"),
-            payload.get("duration"),
-            payload.get("delay"),
-            payload.get("delayOff"),
-        )
-        merged_payload = merged.get(key)
-        if merged_payload is None:
-            merged_payload = {key: value for key, value in payload.items() if key != "set"}
-            merged_payload["set"] = {}
-            merged[key] = merged_payload
-            payloads.append(merged_payload)
-        merged_payload["set"].update(dict(props))
-    return payloads
-
-
-def _is_mergeable_set_payload(payload: Mapping[str, Any]) -> bool:
-    return set(payload).issubset({"id", "nt", "duration", "delay", "delayOff", "set"})
-
-
-def _batch_conflicts(existing: Iterable[_PendingSetPropRequest], new: _PendingSetPropRequest) -> bool:
-    targets: dict[tuple[str, str], tuple[Any, tuple[Any, Any, Any]]] = {}
-    for request in existing:
-        for key, value in _set_prop_targets(request.commands):
-            targets[key] = value
-    for key, value in _set_prop_targets(new.commands):
-        if key in targets and targets[key] != value:
-            return True
-    return False
-
-
-def _set_prop_targets(
-    commands: Iterable[NodeCommand | NodeSet],
-) -> Iterable[tuple[tuple[str, str], tuple[Any, tuple[Any, Any, Any]]]]:
-    for command in commands:
-        payload = command.to_payload()
-        node_key = _node_key(payload.get("id"))
-        props = payload.get("set")
-        if node_key is None or not isinstance(props, Mapping):
-            continue
-        transition = (payload.get("duration"), payload.get("delay"), payload.get("delayOff"))
-        for prop, value in props.items():
-            if isinstance(prop, str):
-                yield (node_key, prop), (value, transition)
-
-
-def _is_motor_pause(action: object) -> bool:
-    if not isinstance(action, Mapping):
-        return False
-    motor_adjust = action.get("motorAdjust")
-    if not isinstance(motor_adjust, Mapping):
-        return False
-    return motor_adjust.get("type") == str(MotorAction.PAUSE)
-
-
-def _commands_summary(commands: Iterable[NodeCommand | NodeSet]) -> tuple[dict[str, Any], ...]:
-    return tuple(_command_payload_summary(command.to_payload()) for command in commands)
-
-
-def _command_payload_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        "id": payload.get("id"),
-        "nt": payload.get("nt"),
-    }
-    for key in ("duration", "delay", "delayOff"):
-        if key in payload:
-            summary[key] = payload.get(key)
-    props = payload.get("set")
-    if isinstance(props, Mapping):
-        summary["set"] = dict(props)
-    action = payload.get("action")
-    if isinstance(action, Mapping):
-        summary["action_keys"] = sorted(str(key) for key in action)
-    return summary
-
-
-def _node_payload_summary(payload: Iterable[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:
-    return tuple(_command_payload_summary(item) for item in payload)
-
-
-def _intent_props_summary(props_by_node: Mapping[str | int, Mapping[str, Any]] | None) -> dict[str, dict[str, Any]]:
-    if not props_by_node:
-        return {}
-    return {str(node_id): dict(props) for node_id, props in props_by_node.items()}
-
-
-async def _maybe_prepare_command_intents(
-    gateway: Any,
-    props_by_node: Mapping[str | int, Mapping[str, Any]] | None,
-) -> CommandIntentToken | None:
-    if not props_by_node:
-        return None
-    prepare = getattr(gateway, "_prepare_command_intents", None)
-    if prepare is None:
-        return None
-    result = prepare(props_by_node)
-    if inspect.isawaitable(result):
-        return await result
-    return result
-
-
-def _merge_intent_tokens(tokens: Iterable[CommandIntentToken]) -> CommandIntentToken | None:
-    generations = tuple(generation for token in tokens for generation in token.property_generations)
-    if not generations:
-        return None
-    return CommandIntentToken(property_generations=generations)
-
-
-def _motor_targets_summary(targets: Iterable[MotorTargetIntent]) -> tuple[dict[str, Any], ...]:
-    return tuple(
-        {
-            "node_id": str(target.node_id),
-            "current_prop": target.current_prop,
-            "target_prop": target.target_prop,
-            "target_value": target.target_value,
-        }
-        for target in targets
-    )
-
-
-def _response_summary(response: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: response.get(key) for key in ("id", "method", "result", "data") if key in response}
-
-
-def _raise_for_missing_write_ack(method: str, response: Mapping[str, Any]) -> None:
-    if response.get("result") == "ok":
-        return
-    raise ProtocolError(f"{method} did not return a successful acknowledgement")

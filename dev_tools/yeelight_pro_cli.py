@@ -167,7 +167,7 @@ async def _cmd_describe(args: argparse.Namespace) -> int:
         await gateway.sync(include_groups=True, include_rooms=True)
         node_id = _lookup_node_id(gateway, args.id)
         if node_id in gateway.state.nodes:
-            await gateway.refresh_node(node_id)
+            await gateway.readback_node(node_id)
         node = gateway.state.nodes.get(node_id)
         if node is None:
             raise SystemExit(f"device not found: {args.id}")
