@@ -50,7 +50,7 @@ class FullPropertySyncTimedOutEvent:
 class RefreshNodeCommand:
     node_id: str | int
     node_type: int | None = None
-    request_generations: Mapping[str, int] | None = None
+    captured_write_ids: Mapping[str | int, Mapping[str, int]] | None = None
 
 
 SessionActorMessage: TypeAlias = (

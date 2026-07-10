@@ -20,6 +20,7 @@ from ..messages import (
     ApplyRoomsCommand,
     ApplyScenesCommand,
     ApplyTopologyCommand,
+    CaptureWriteWatermarkCommand,
     ConfigureAutoSyncCommand,
     ConnectConnectionCommand,
     ConnectionActorMessage,
@@ -40,7 +41,6 @@ from ..messages import (
     StateChangeReason,
     SyncCompletedEvent,
     SyncSessionCommand,
-    SyncStartedEvent,
     SyntheticSessionMethod,
 )
 from ..model.status import GatewaySessionState
@@ -197,7 +197,7 @@ class SessionActor(Actor[SessionActorMessage]):
             return await self._refresh_node(
                 message.node_id,
                 message.node_type,
-                request_generations=message.request_generations,
+                captured_write_ids=message.captured_write_ids,
             )
         if isinstance(message, ConnectionOnlineEvent):
             await self._handle_connection_online(message)
@@ -221,14 +221,15 @@ class SessionActor(Actor[SessionActorMessage]):
         self.last_full_sync_source = None
         _LOGGER.debug("Yeelight Pro sync starting: options=%s", options)
         try:
-            await self.device_state_ref.tell(SyncStartedEvent(reason=StateChangeReason.MANUAL_SYNC))
             await self._set_session_state(GatewaySessionState.WAITING_TOPOLOGY)
+            captured_write_ids = await self.device_state_ref.ask(CaptureWriteWatermarkCommand())
             topology = await self._get_topology()
             await self.device_state_ref.ask(
                 ApplyTopologyCommand(
                     payload=topology,
                     reason=StateChangeReason.TOPOLOGY_SYNC,
                     message={"method": SyntheticSessionMethod.SYNC_TOPOLOGY},
+                    captured_write_ids=captured_write_ids,
                 )
             )
             await self._begin_full_property_wait(options)
@@ -271,9 +272,14 @@ class SessionActor(Actor[SessionActorMessage]):
         try:
             _LOGGER.debug("Yeelight Pro full property push timeout; polling all nodes: sync_id=%s", message.sync_id)
             await self._set_session_state(GatewaySessionState.RECOVERING)
+            captured_write_ids = await self.device_state_ref.ask(CaptureWriteWatermarkCommand())
             result = await self._get_all_nodes()
             await self.device_state_ref.ask(
-                ApplyPropertiesCommand(payload=result, reason=StateChangeReason.POLL_FULL_PROPERTIES)
+                ApplyPropertiesCommand(
+                    payload=result,
+                    reason=StateChangeReason.POLL_FULL_PROPERTIES,
+                    captured_write_ids=captured_write_ids,
+                )
             )
             self.last_full_sync_at = datetime.now(UTC)
             self.last_full_sync_source = FullSyncSource.POLL
@@ -292,7 +298,13 @@ class SessionActor(Actor[SessionActorMessage]):
             options,
         )
         if options.include_groups:
-            await self.device_state_ref.ask(ApplyGroupsCommand(await self._get_group()))
+            captured_write_ids = await self.device_state_ref.ask(CaptureWriteWatermarkCommand())
+            await self.device_state_ref.ask(
+                ApplyGroupsCommand(
+                    await self._get_group(),
+                    captured_write_ids=captured_write_ids,
+                )
+            )
         if options.include_rooms:
             await self.device_state_ref.ask(ApplyRoomsCommand(await self._get_room()))
         if options.include_scenes:
@@ -345,7 +357,7 @@ class SessionActor(Actor[SessionActorMessage]):
         node_id: str | int,
         node_type: int | None,
         *,
-        request_generations: Mapping[str, int] | None = None,
+        captured_write_ids: Mapping[str | int, Mapping[str, int]] | None = None,
     ) -> JSONDict:
         _LOGGER.debug("Yeelight Pro refreshing node: node_id=%s node_type=%s", node_id, node_type)
         if _is_mesh_group_node(node_type):
@@ -359,7 +371,7 @@ class SessionActor(Actor[SessionActorMessage]):
                 ApplyGroupsCommand(
                     payload=result,
                     reason=StateChangeReason.NODE_REFRESH,
-                    request_generations=None if request_generations is None else {node_id: request_generations},
+                    captured_write_ids=captured_write_ids,
                 )
             )
             return result
@@ -369,7 +381,7 @@ class SessionActor(Actor[SessionActorMessage]):
             ApplyPropertiesCommand(
                 payload=result,
                 reason=StateChangeReason.NODE_REFRESH,
-                request_generations=None if request_generations is None else {node_id: request_generations},
+                captured_write_ids=captured_write_ids,
             )
         )
         return result

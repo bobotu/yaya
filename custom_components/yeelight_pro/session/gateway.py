@@ -5,7 +5,7 @@ import contextlib
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypeAlias
 
@@ -22,15 +22,16 @@ from ..core.topology import TopologyNode
 from ..core.updates import PropertyChange
 from .actors import Actor, ActorClosed, ActorRef, ConnectionActor, DeviceStateActor, SessionActor, create_actor_task
 from .messages import (
+    AcceptPendingWritesCommand,
     CloseConnectionCommand,
     ConfigureAutoSyncCommand,
     ConnectSessionCommand,
     DisableAutoSyncCommand,
+    FailPendingWritesCommand,
     FullSyncSource,
     GatewayEventReceived,
     GatewayRpcRequest,
-    PrepareCommandIntentCommand,
-    RecordCommandIntentCommand,
+    PreparePendingWritesCommand,
     RefreshNodeCommand,
     RefreshNodeRequestedEvent,
     SessionEvent,
@@ -40,12 +41,12 @@ from .messages import (
     SyncSessionCommand,
 )
 from .model import (
-    COMMAND_INTENT_TTL,
     MOTOR_CURRENT_ANGLE_PROP,
     MOTOR_CURRENT_POSITION_PROP,
     MOTOR_TARGET_ANGLE_PROP,
     MOTOR_TARGET_POSITION_PROP,
-    CommandIntentToken,
+    PENDING_WRITE_QUIET_WINDOW,
+    PENDING_WRITE_REPORT_GRACE,
     GatewaySessionState,
     MotorTargetIntent,
 )
@@ -70,7 +71,8 @@ class YeelightProGateway:
         port: int = GATEWAY_CONTROL_PORT,
         request_timeout: float = 5.0,
         reconnect_delay: float = 2.0,
-        command_intent_ttl: float = COMMAND_INTENT_TTL,
+        command_report_grace: float = PENDING_WRITE_REPORT_GRACE,
+        command_quiet_window: float = PENDING_WRITE_QUIET_WINDOW,
         set_prop_batch_delay: float = 0.01,
         rpc: GatewayRPC | None = None,
     ) -> None:
@@ -83,14 +85,19 @@ class YeelightProGateway:
         self._connection = ConnectionActor(self._rpc)
         self._connection_ref = ActorRef(self._connection)
         self._connection.bind_push_listener(self._connection_ref)
-        self._state_actor = DeviceStateActor(ttl=command_intent_ttl, refresh_timeout=request_timeout)
+        self._state_actor = DeviceStateActor(
+            report_grace=command_report_grace,
+            quiet_window=command_quiet_window,
+            refresh_timeout=request_timeout,
+        )
         self._state_ref = ActorRef(self._state_actor)
         self._session = SessionActor(connection_ref=self._connection_ref, device_state_ref=self._state_ref)
         self._session_ref = ActorRef(self._session)
         self._connection.set_session_sink(self._session_ref.tell)
         self._state_actor.set_refresh_requester(self._handle_refresh_requested)
         self.state = self._state_actor.state
-        self.command_intent_ttl = command_intent_ttl
+        self.command_report_grace = command_report_grace
+        self.command_quiet_window = command_quiet_window
         self._set_prop_batcher = _SetPropBatcher(self, delay=set_prop_batch_delay)
 
     async def __aenter__(self) -> YeelightProGateway:
@@ -226,39 +233,36 @@ class YeelightProGateway:
         self,
         commands: Iterable[NodeCommand | NodeSet],
         *,
-        intent_props_by_node: Mapping[str | int, Mapping[str, Any]] | None = None,
+        pending_props_by_node: Mapping[str | int, Mapping[str, Any]] | None = None,
     ) -> JSONDict:
         commands = tuple(commands)
         if not commands:
             raise ValueError("_send_node_commands requires at least one node command")
 
         _LOGGER.debug(
-            "Yeelight Pro enqueue node commands: commands=%s intents=%s",
+            "Yeelight Pro enqueue node commands: commands=%s pending=%s",
             _commands_summary(commands),
-            _intent_props_summary(intent_props_by_node),
+            _pending_props_summary(pending_props_by_node),
         )
-        return await self._set_prop_batcher.submit(commands, intent_props_by_node)
+        return await self._set_prop_batcher.submit(commands, pending_props_by_node)
 
     async def _send_node_command_batch(self, requests: tuple[_PendingSetPropRequest, ...]) -> JSONDict:
         commands: list[NodeCommand | NodeSet] = []
-        intent_props_by_node: dict[str | int, dict[str, Any]] = {}
-        intent_tokens: list[CommandIntentToken] = []
+        pending_props_by_node: dict[str | int, dict[str, Any]] = {}
         for request in requests:
             commands.extend(request.commands)
-            if request.intent_props_by_node is None:
+            if request.pending_props_by_node is None:
                 continue
-            for node_id, props in request.intent_props_by_node.items():
-                intent_props_by_node.setdefault(node_id, {}).update(dict(props))
-            if request.intent_token is not None:
-                intent_tokens.append(request.intent_token)
+            for node_id, props in request.pending_props_by_node.items():
+                pending_props_by_node.setdefault(node_id, {}).update(dict(props))
 
         payload = _batched_payload_from_commands(commands)
         batch_ids = tuple(request.request_id for request in requests)
         _LOGGER.debug(
-            "Yeelight Pro sending set_prop batch: batch_requests=%s payload=%s intents=%s",
+            "Yeelight Pro sending set_prop batch: batch_requests=%s payload=%s pending=%s",
             batch_ids,
             _node_payload_summary(payload),
-            _intent_props_summary(intent_props_by_node),
+            _pending_props_summary(pending_props_by_node),
         )
         response = await self.request(GatewayMethod.SET_PROP, {"nodes": payload})
         _LOGGER.debug(
@@ -268,19 +272,13 @@ class YeelightProGateway:
         )
         _raise_for_missing_write_ack(GatewayMethod.SET_PROP, response)
         targets, stops = _motor_tracking_from_payload(payload)
-        if intent_props_by_node:
-            await self._record_command_intents(
-                intent_props_by_node,
-                motor_targets=tuple(targets),
-                motor_stops=tuple(stops),
-                token=_merge_intent_tokens(intent_tokens),
-            )
-        elif targets or stops:
-            await self._record_command_intents(
-                {},
+        await self._state_ref.ask(
+            AcceptPendingWritesCommand(
+                write_ids=batch_ids,
                 motor_targets=tuple(targets),
                 motor_stops=tuple(stops),
             )
+        )
         return response
 
     async def set_scenes(self, scenes: Iterable[Mapping[str, Any]]) -> JSONDict:
@@ -299,10 +297,10 @@ class YeelightProGateway:
         self,
         command: NodeCommand | NodeSet,
         *,
-        intent_props: Mapping[str, Any] | None = None,
+        pending_props: Mapping[str, Any] | None = None,
     ) -> JSONDict:
-        intent_props_by_node = {command.id: intent_props} if intent_props else None
-        return await self._send_node_commands([command], intent_props_by_node=intent_props_by_node)
+        pending_props_by_node = {command.id: pending_props} if pending_props else None
+        return await self._send_node_commands([command], pending_props_by_node=pending_props_by_node)
 
     async def set_node_props(
         self,
@@ -311,12 +309,12 @@ class YeelightProGateway:
         *,
         nt: int = DEFAULT_MESH_NODE_TYPE,
         duration: int | None = None,
-        intent_props: Mapping[str, Any] | None = None,
+        pending_props: Mapping[str, Any] | None = None,
     ) -> JSONDict:
-        intent_props_by_node = {node_id: intent_props} if intent_props else None
+        pending_props_by_node = {node_id: pending_props} if pending_props else None
         return await self._send_node_commands(
             [NodeCommand(id=node_id, nt=nt, props=props, duration=duration)],
-            intent_props_by_node=intent_props_by_node,
+            pending_props_by_node=pending_props_by_node,
         )
 
     async def motor_adjust(
@@ -357,10 +355,10 @@ class YeelightProGateway:
     def visible_nodes(self) -> list[TopologyNode]:
         return self._state_actor.visible_nodes()
 
-    def has_pending_intent(self, node_id: str | int, props: Iterable[str] | None = None) -> bool:
+    def has_pending_write(self, node_id: str | int, props: Iterable[str] | None = None) -> bool:
         return self._state_actor.has_pending(node_id, props)
 
-    def intent_diagnostics(self) -> dict[str, Any]:
+    def pending_write_diagnostics(self) -> dict[str, Any]:
         return self._state_actor.diagnostics()
 
     def motor_tracking_diagnostics(self) -> dict[str, Any]:
@@ -392,57 +390,42 @@ class YeelightProGateway:
     def events_from_message(message: Mapping[str, Any]) -> list[GatewayEvent]:
         return list(iter_gateway_events(message))
 
-    async def _record_command_intents(
-        self,
-        props_by_node: Mapping[str | int, Mapping[str, Any]],
-        *,
-        motor_targets: tuple[MotorTargetIntent, ...] = (),
-        motor_stops: tuple[str | int, ...] = (),
-        token: CommandIntentToken | None = None,
-    ) -> None:
+    async def _handle_refresh_requested(self, event: RefreshNodeRequestedEvent) -> Mapping[str, Any]:
         _LOGGER.debug(
-            "Yeelight Pro record command intents: props=%s motor_targets=%s motor_stops=%s",
-            _intent_props_summary(props_by_node),
-            _motor_targets_summary(motor_targets),
-            tuple(str(node_id) for node_id in motor_stops),
-        )
-        await self._state_ref.ask(
-            RecordCommandIntentCommand(
-                props_by_node=props_by_node,
-                motor_targets=motor_targets,
-                motor_stops=motor_stops,
-                token=token,
-            )
-        )
-
-    async def _handle_refresh_requested(self, event: RefreshNodeRequestedEvent) -> None:
-        _LOGGER.debug(
-            "Yeelight Pro refresh requested after intent expiry: node_id=%s node_type=%s",
+            "Yeelight Pro refresh requested for unsettled write: node_id=%s node_type=%s",
             event.node_id,
             event.node_type,
         )
-        await self._session_ref.ask(
+        captured = {event.node_id: dict(event.write_ids)}
+        return await self._session_ref.ask(
             RefreshNodeCommand(
                 node_id=event.node_id,
                 node_type=event.node_type,
-                request_generations=event.request_generations,
+                captured_write_ids=captured,
             )
         )
 
-    async def _prepare_command_intents(
+    async def _prepare_pending_writes(
         self,
+        write_id: int,
+        commands: tuple[NodeCommand | NodeSet, ...],
         props_by_node: Mapping[str | int, Mapping[str, Any]],
-    ) -> CommandIntentToken:
-        return await self._state_ref.ask(PrepareCommandIntentCommand(props_by_node=props_by_node))
+    ) -> None:
+        await self._state_ref.ask(
+            PreparePendingWritesCommand(
+                write_id=write_id,
+                props_by_node=props_by_node,
+                transition_delays=_pending_transition_delays(commands, props_by_node),
+            )
+        )
 
 
 @dataclass(frozen=True)
 class _PendingSetPropRequest:
     request_id: int
     commands: tuple[NodeCommand | NodeSet, ...]
-    intent_props_by_node: Mapping[str | int, Mapping[str, Any]] | None
+    pending_props_by_node: Mapping[str | int, Mapping[str, Any]] | None
     future: asyncio.Future[JSONDict]
-    intent_token: CommandIntentToken | None = None
 
 
 @dataclass(frozen=True)
@@ -474,7 +457,7 @@ class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
     async def submit(
         self,
         commands: tuple[NodeCommand | NodeSet, ...],
-        intent_props_by_node: Mapping[str | int, Mapping[str, Any]] | None,
+        pending_props_by_node: Mapping[str | int, Mapping[str, Any]] | None,
     ) -> JSONDict:
         if self._closing or self.closed:
             raise ActorClosed("set_prop batcher is closed")
@@ -483,16 +466,16 @@ class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
         self._next_request_id += 1
         request_id = self._next_request_id
         _LOGGER.debug(
-            "Yeelight Pro set_prop batcher submit: request=%s commands=%s intents=%s",
+            "Yeelight Pro set_prop batcher submit: request=%s commands=%s pending=%s",
             request_id,
             _commands_summary(commands),
-            _intent_props_summary(intent_props_by_node),
+            _pending_props_summary(pending_props_by_node),
         )
         await self._ref.ask(
             _PendingSetPropRequest(
                 request_id=request_id,
                 commands=commands,
-                intent_props_by_node=intent_props_by_node,
+                pending_props_by_node=pending_props_by_node,
                 future=future,
             )
         )
@@ -525,26 +508,38 @@ class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
                 request.future.set_exception(ActorClosed("set_prop batcher is closed"))
             _LOGGER.debug("Yeelight Pro set_prop batcher rejected after close: request=%s", request.request_id)
             return
-        if self._pending and _batch_conflicts(self._pending, request):
-            _LOGGER.debug(
-                "Yeelight Pro set_prop batcher conflict flush: pending=%s incoming=%s",
-                tuple(item.request_id for item in self._pending),
-                request.request_id,
-            )
-            self._flush_pending()
         try:
-            intent_token = await _maybe_prepare_command_intents(self._gateway, request.intent_props_by_node)
+            await _maybe_prepare_pending_writes(
+                self._gateway,
+                request.request_id,
+                request.commands,
+                request.pending_props_by_node,
+            )
         except Exception as exc:  # noqa: BLE001 - preparation failure rejects the write before enqueue.
             if not request.future.done():
                 request.future.set_exception(exc)
             return
-        self._pending.append(replace(request, intent_token=intent_token))
-        _LOGGER.debug(
-            "Yeelight Pro set_prop batcher queued: request=%s pending=%s",
-            request.request_id,
-            tuple(item.request_id for item in self._pending),
-        )
-        await self._schedule_flush()
+        try:
+            if self._pending and _batch_conflicts(self._pending, request):
+                _LOGGER.debug(
+                    "Yeelight Pro set_prop batcher conflict flush: pending=%s incoming=%s",
+                    tuple(item.request_id for item in self._pending),
+                    request.request_id,
+                )
+                self._flush_pending()
+            self._pending.append(request)
+            _LOGGER.debug(
+                "Yeelight Pro set_prop batcher queued: request=%s pending=%s",
+                request.request_id,
+                tuple(item.request_id for item in self._pending),
+            )
+            await self._schedule_flush()
+        except Exception as exc:  # noqa: BLE001 - reject and release only this prepared barrier.
+            with contextlib.suppress(ValueError):
+                self._pending.remove(request)
+            await self._gateway._state_ref.ask(FailPendingWritesCommand(write_ids=(request.request_id,)))
+            if not request.future.done():
+                request.future.set_exception(exc)
 
     async def _schedule_flush(self) -> None:
         if self._flush_task is not None and not self._flush_task.done():
@@ -601,6 +596,9 @@ class _SetPropBatcher(Actor[_SetPropBatcherMessage]):
         try:
             response = await self._gateway._send_node_command_batch(requests)
         except Exception as exc:  # noqa: BLE001 - propagate RPC failure to every original caller.
+            await self._gateway._state_ref.ask(
+                FailPendingWritesCommand(write_ids=tuple(request.request_id for request in requests))
+            )
             _LOGGER.debug(
                 "Yeelight Pro set_prop batcher failed: batch=%s requests=%s error=%s",
                 batch_id,
@@ -787,32 +785,45 @@ def _node_payload_summary(payload: Iterable[Mapping[str, Any]]) -> tuple[dict[st
     return tuple(_command_payload_summary(item) for item in payload)
 
 
-def _intent_props_summary(props_by_node: Mapping[str | int, Mapping[str, Any]] | None) -> dict[str, dict[str, Any]]:
+def _pending_props_summary(props_by_node: Mapping[str | int, Mapping[str, Any]] | None) -> dict[str, dict[str, Any]]:
     if not props_by_node:
         return {}
     return {str(node_id): dict(props) for node_id, props in props_by_node.items()}
 
 
-async def _maybe_prepare_command_intents(
+async def _maybe_prepare_pending_writes(
     gateway: Any,
+    write_id: int,
+    commands: tuple[NodeCommand | NodeSet, ...],
     props_by_node: Mapping[str | int, Mapping[str, Any]] | None,
-) -> CommandIntentToken | None:
+) -> None:
     if not props_by_node:
-        return None
-    prepare = getattr(gateway, "_prepare_command_intents", None)
+        return
+    prepare = getattr(gateway, "_prepare_pending_writes", None)
     if prepare is None:
-        return None
-    result = prepare(props_by_node)
+        return
+    result = prepare(write_id, commands, props_by_node)
     if inspect.isawaitable(result):
-        return await result
-    return result
+        await result
 
 
-def _merge_intent_tokens(tokens: Iterable[CommandIntentToken]) -> CommandIntentToken | None:
-    generations = tuple(generation for token in tokens for generation in token.property_generations)
-    if not generations:
-        return None
-    return CommandIntentToken(property_generations=generations)
+def _pending_transition_delays(
+    commands: Iterable[NodeCommand | NodeSet],
+    props_by_node: Mapping[str | int, Mapping[str, Any]],
+) -> dict[str | int, dict[str, float]]:
+    delays: dict[str | int, dict[str, float]] = {}
+    for command in commands:
+        tracked = props_by_node.get(command.id)
+        if not tracked:
+            continue
+        payload = command.to_payload()
+        duration = payload.get("duration")
+        delay = payload.get("delay")
+        milliseconds = sum(
+            value for value in (duration, delay) if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        )
+        delays[command.id] = {prop: milliseconds / 1000 for prop in tracked if isinstance(prop, str)}
+    return delays
 
 
 def _motor_targets_summary(targets: Iterable[MotorTargetIntent]) -> tuple[dict[str, Any], ...]:

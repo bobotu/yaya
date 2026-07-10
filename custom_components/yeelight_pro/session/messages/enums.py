@@ -12,9 +12,8 @@ class StateChangeReason(StrEnum):
     GENERIC_PUSH = "generic push"
     NODE_REFRESH = "node refresh"
     POLL_FULL_PROPERTIES = "poll full properties"
-    COMMAND_INTENT_RECORDED = "command intent recorded"
-    COMMAND_INTENT_CLEARED = "command intent cleared"
-    COMMAND_INTENT_EXPIRED = "command intent expired"
+    PENDING_WRITE_PREPARED = "pending write prepared"
+    PENDING_WRITE_RELEASED = "pending write released"
 
 
 class FullSyncSource(StrEnum):
@@ -25,6 +24,5 @@ class FullSyncSource(StrEnum):
 class SyntheticSessionMethod(StrEnum):
     SYNC_TOPOLOGY = "gateway_sync.topology"
     SYNC_COMPLETE = "gateway_sync.complete"
-    COMMAND_INTENT_RECORDED = "gateway_intent.recorded"
-    COMMAND_INTENT_CLEAR = "gateway_intent.clear"
-    COMMAND_INTENT_EXPIRED = "gateway_intent.expired"
+    PENDING_WRITE_PREPARED = "gateway_pending.prepared"
+    PENDING_WRITE_RELEASED = "gateway_pending.released"

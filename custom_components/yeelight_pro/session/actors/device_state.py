@@ -7,12 +7,14 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextlib import suppress
 from typing import Any
 
+from ...core.coercion import int_or_none as _int_or_none
 from ...core.coercion import node_id_or_none
 from ...core.coercion import node_key as _node_key
 from ...core.protocol import list_payload
 from ...core.topology import TopologyNode
 from ...core.updates import PropertyChange
 from ..messages import (
+    AcceptPendingWritesCommand,
     AppliedPropertiesResult,
     ApplyGenericStateMessageCommand,
     ApplyGroupsCommand,
@@ -21,20 +23,21 @@ from ..messages import (
     ApplyScenesCommand,
     ApplyTopologyCommand,
     AuthoritativeStateChangedEvent,
+    CaptureWriteWatermarkCommand,
     DeviceStateActorMessage,
-    ExpireCommandIntentsCommand,
-    PrepareCommandIntentCommand,
-    RecordCommandIntentCommand,
+    FailPendingWritesCommand,
+    PendingWritesTickCommand,
+    PreparePendingWritesCommand,
     RefreshNodeRequestedEvent,
-    ResolveExpiredIntentRefreshCommand,
+    ResolvePendingRefreshCommand,
     SessionStatusChanged,
     StateChangeReason,
     StateSnapshotChanged,
     SyncCompletedEvent,
-    SyncStartedEvent,
     SyntheticSessionMethod,
 )
-from ..model.intent import CommandIntentRegistry
+from ..model.motor import MOTOR_TRACKING_TTL, MotorStateTracker
+from ..model.pending import PendingRefresh, PendingWriteTracker
 from ..model.state import GatewayState
 from ..model.status import GatewaySessionState
 from .base import Actor, ActorClosed, ActorRef, create_actor_task
@@ -43,29 +46,31 @@ _LOGGER = logging.getLogger(__name__)
 _MAX_LOG_ITEMS = 20
 StateListener = Callable[[StateSnapshotChanged], Awaitable[None] | None]
 PropertyListener = Callable[[PropertyChange], Awaitable[None] | None]
-RefreshRequester = Callable[[RefreshNodeRequestedEvent], Awaitable[None] | None]
+RefreshRequester = Callable[[RefreshNodeRequestedEvent], Awaitable[Mapping[str, Any]] | Mapping[str, Any]]
 VisibleProjectionSignature = tuple[object, ...]
 
 
 class DeviceStateActor(Actor[DeviceStateActorMessage]):
-    """Owns authoritative gateway state and registry-owned command intents."""
+    """Own raw gateway state and the settled HA-visible projection."""
 
     def __init__(
         self,
         *,
-        ttl: float | None = None,
+        report_grace: float | None = None,
+        quiet_window: float | None = None,
         motor_tracking_ttl: float | None = None,
         refresh_timeout: float = 5.0,
     ) -> None:
         super().__init__("yeelight-pro-device-state")
         self._ref: ActorRef[DeviceStateActorMessage] = ActorRef(self)
         self.state = GatewayState()
-        intent_kwargs: dict[str, float] = {}
-        if ttl is not None:
-            intent_kwargs["ttl"] = ttl
-        if motor_tracking_ttl is not None:
-            intent_kwargs["motor_tracking_ttl"] = motor_tracking_ttl
-        self.intents = CommandIntentRegistry(**intent_kwargs)
+        tracker_kwargs: dict[str, float] = {}
+        if report_grace is not None:
+            tracker_kwargs["report_grace"] = report_grace
+        if quiet_window is not None:
+            tracker_kwargs["quiet_window"] = quiet_window
+        self.pending_writes = PendingWriteTracker(**tracker_kwargs)
+        self.motor = MotorStateTracker(ttl=MOTOR_TRACKING_TTL if motor_tracking_ttl is None else motor_tracking_ttl)
         self._visible_nodes: dict[str | int, TopologyNode] = {}
         self._watchdog: asyncio.Task[None] | None = None
         self._state_listeners: list[StateListener] = []
@@ -102,13 +107,13 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         return list(self._visible_nodes.values())
 
     def has_pending(self, node_id: str | int, props: Iterable[str] | None = None) -> bool:
-        return self.intents.has_pending(node_id, props)
+        return self.pending_writes.has_pending(node_id, props) or (props is None and self.motor.has_tracking(node_id))
 
     def diagnostics(self) -> dict[str, Any]:
-        return self.intents.diagnostics(now=asyncio.get_running_loop().time())
+        return self.pending_writes.diagnostics(now=asyncio.get_running_loop().time())
 
     def motor_diagnostics(self) -> dict[str, Any]:
-        return self.intents.motor.diagnostics(now=asyncio.get_running_loop().time())
+        return self.motor.diagnostics(now=asyncio.get_running_loop().time())
 
     async def close(self) -> None:
         self._cancel_watchdog()
@@ -129,12 +134,18 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         if isinstance(message, ApplyScenesCommand):
             self.state.apply_scenes(message.payload)
             return None
-        if isinstance(message, RecordCommandIntentCommand):
-            return await self._record_command_intent(message)
-        if isinstance(message, PrepareCommandIntentCommand):
-            return self.intents.prepare_property_intents(message.props_by_node)
-        if isinstance(message, SyncStartedEvent):
-            return await self._handle_sync_started()
+        if isinstance(message, PreparePendingWritesCommand):
+            return await self._prepare_writes(message)
+        if isinstance(message, AcceptPendingWritesCommand):
+            return await self._accept_writes(message)
+        if isinstance(message, FailPendingWritesCommand):
+            return await self._fail_writes(message)
+        if isinstance(message, CaptureWriteWatermarkCommand):
+            return self.pending_writes.capture_write_ids()
+        if isinstance(message, PendingWritesTickCommand):
+            return await self._tick_pending()
+        if isinstance(message, ResolvePendingRefreshCommand):
+            return await self._resolve_refresh(message)
         if isinstance(message, SyncCompletedEvent):
             return await self._publish_snapshot(
                 StateChangeReason.SYNC_COMPLETE,
@@ -142,57 +153,35 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             )
         if isinstance(message, SessionStatusChanged):
             return await self._handle_session_status(message)
-        if isinstance(message, ExpireCommandIntentsCommand):
-            return await self._expire_command_intents()
-        if isinstance(message, ResolveExpiredIntentRefreshCommand):
-            return await self._resolve_expired_intent_refresh(message)
         raise TypeError(f"unsupported device state message: {type(message).__name__}")
 
     async def _apply_topology(self, message: ApplyTopologyCommand) -> None:
         before = self._visible_projection_signature()
-        topology = self.state.apply_topology(message.payload, replace=message.replace)
+        payload = self.pending_writes.filter_stale_pull(message.payload, message.captured_write_ids)
+        self.state.apply_topology(payload, replace=message.replace)
         await self._after_authoritative_changed(
-            AuthoritativeStateChangedEvent(reason=message.reason, message=message.message),
-            topology_changed=True,
-            active_topology_node_ids={node.id for node in topology.nodes} if message.replace else None,
+            AuthoritativeStateChangedEvent(reason=message.reason, message=payload),
             before_visible=before,
         )
 
     async def _apply_properties(self, message: ApplyPropertiesCommand) -> AppliedPropertiesResult:
         before = self._visible_projection_signature()
-        changes = tuple(self.state.apply_properties(message.payload))
+        payload = self.pending_writes.filter_stale_pull(message.payload, message.captured_write_ids)
+        changes = tuple(self.state.apply_properties(payload))
         full_coverage = self.state.full_property_coverage(message.payload)
         await self._after_authoritative_changed(
-            AuthoritativeStateChangedEvent(
-                reason=message.reason,
-                message=message.payload,
-                changes=changes,
-                request_generations=message.request_generations,
-            ),
-            topology_changed=False,
-            active_topology_node_ids=None,
+            AuthoritativeStateChangedEvent(reason=message.reason, message=payload, changes=changes),
             before_visible=before,
         )
         return AppliedPropertiesResult(changes=changes, full_property_coverage=full_coverage)
 
     async def _apply_groups(self, message: ApplyGroupsCommand) -> None:
         before = self._visible_projection_signature()
-        changes = tuple(self.state.apply_groups(message.payload))
-        if message.reason is None:
-            if changes:
-                self._rebuild_visible_cache()
-                for change in changes:
-                    await self._notify_property(change)
-            return
+        payload = self.pending_writes.filter_stale_pull(message.payload, message.captured_write_ids)
+        changes = tuple(self.state.apply_groups(payload))
+        reason = message.reason or StateChangeReason.POLL_FULL_PROPERTIES
         await self._after_authoritative_changed(
-            AuthoritativeStateChangedEvent(
-                reason=message.reason,
-                message=message.payload,
-                changes=changes,
-                request_generations=message.request_generations,
-            ),
-            topology_changed=False,
-            active_topology_node_ids=None,
+            AuthoritativeStateChangedEvent(reason=reason, message=payload, changes=changes),
             before_visible=before,
         )
 
@@ -201,8 +190,6 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         self.state.apply_message(message.payload)
         await self._after_authoritative_changed(
             AuthoritativeStateChangedEvent(reason=message.reason, message=message.payload),
-            topology_changed=message.reason in {StateChangeReason.TOPOLOGY_PUSH, StateChangeReason.TOPOLOGY_SYNC},
-            active_topology_node_ids=None,
             before_visible=before,
         )
 
@@ -210,109 +197,79 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         self,
         event: AuthoritativeStateChangedEvent,
         *,
-        topology_changed: bool,
-        active_topology_node_ids: Iterable[str | int] | None,
         before_visible: VisibleProjectionSignature,
     ) -> None:
         now = asyncio.get_running_loop().time()
-        intent_result = self.intents.apply_authoritative_message(
-            event.message,
-            nodes=self.state.nodes,
-            now=now,
-            request_generations=event.request_generations,
-        )
-        intent_affected = set(intent_result.affected)
-        stale_affected = set(intent_result.stale_affected)
-        refreshing_affected = set(intent_result.refreshing_affected)
+        pending_affected = self.pending_writes.apply_observation(event.message, now=now)
+        motor_affected = self.motor.apply_authoritative_message(event.message, self.state.nodes, now=now)
         _LOGGER.debug(
-            "Yeelight Pro authoritative state applied: "
-            "reason=%s summary=%s intent_affected_nodes=%s stale_affected_nodes=%s "
-            "refreshing_affected_nodes=%s decisions=%s",
+            "Yeelight Pro observation applied: reason=%s summary=%s pending=%s motor=%s",
             event.reason,
             _message_summary(event.message),
-            sorted(str(node_id) for node_id in intent_affected),
-            sorted(str(node_id) for node_id in stale_affected),
-            sorted(str(node_id) for node_id in refreshing_affected),
-            intent_result.decisions,
+            sorted(str(node_id) for node_id in pending_affected),
+            sorted(str(node_id) for node_id in motor_affected),
         )
-        if topology_changed and active_topology_node_ids is not None:
-            intent_affected.update(self.intents.clear_missing_nodes(active_topology_node_ids))
-        if intent_affected:
-            self._schedule_watchdog()
-        self._rebuild_visible_cache()
-        snapshot_reasons = {
-            StateChangeReason.PROPERTY_PUSH,
-            StateChangeReason.TOPOLOGY_PUSH,
-            StateChangeReason.TOPOLOGY_SYNC,
-            StateChangeReason.NODE_REFRESH,
-            StateChangeReason.POLL_FULL_PROPERTIES,
-        }
-        if event.changes:
-            for change in event.changes:
-                await self._notify_property(change)
-        if (
-            event.changes
-            or intent_affected
-            or stale_affected
-            or refreshing_affected
-            or event.reason in snapshot_reasons
-        ):
-            await self._publish_if_visible_changed(
-                event.reason,
-                event.message,
-                before_visible=before_visible,
-                changes=event.changes,
-            )
-
-    async def _record_command_intent(self, message: RecordCommandIntentCommand) -> None:
-        now = asyncio.get_running_loop().time()
-        before = self._visible_projection_signature()
-        affected: set[str | int] = set()
-        affected.update(
-            self.intents.record_property_intents(
-                message.props_by_node,
-                nodes=self.state.nodes,
-                now=now,
-                token=message.token,
-            )
-        )
-        affected.update(self.intents.record_motor_targets(message.motor_targets, nodes=self.state.nodes, now=now))
-        for node_id in message.motor_stops:
-            affected.update(self.intents.clear_node(node_id))
-        _LOGGER.debug(
-            "Yeelight Pro command intent recorded: props=%s motor_targets=%s motor_stops=%s affected=%s diagnostics=%s",
-            _props_by_node_summary(message.props_by_node),
-            _motor_targets_summary(message.motor_targets),
-            tuple(str(node_id) for node_id in message.motor_stops),
-            sorted(str(node_id) for node_id in affected),
-            self.intents.diagnostics(now=now),
-        )
-        if not affected:
-            return
         self._schedule_watchdog()
         self._rebuild_visible_cache()
+        for change in event.changes:
+            await self._notify_property(change)
         await self._publish_if_visible_changed(
-            StateChangeReason.COMMAND_INTENT_RECORDED,
-            {
-                "method": SyntheticSessionMethod.COMMAND_INTENT_RECORDED,
-                "nodes": [{"id": node_id} for node_id in affected],
-            },
+            event.reason,
+            event.message,
+            before_visible=before_visible,
+            changes=event.changes,
+        )
+
+    async def _prepare_writes(self, message: PreparePendingWritesCommand) -> None:
+        before = self._visible_projection_signature()
+        affected = self.pending_writes.prepare_writes(
+            message.write_id,
+            message.props_by_node,
+            nodes=self.state.nodes,
+            now=asyncio.get_running_loop().time(),
+            transition_delays=message.transition_delays,
+        )
+        _LOGGER.debug(
+            "Yeelight Pro pending write barriers prepared: write=%s props=%s affected=%s",
+            message.write_id,
+            _props_by_node_summary(message.props_by_node),
+            sorted(str(node_id) for node_id in affected),
+        )
+        self._rebuild_visible_cache()
+        await self._publish_if_visible_changed(
+            StateChangeReason.PENDING_WRITE_PREPARED,
+            {"method": SyntheticSessionMethod.PENDING_WRITE_PREPARED},
             before_visible=before,
         )
 
-    async def _handle_sync_started(self) -> None:
+    async def _accept_writes(self, message: AcceptPendingWritesCommand) -> None:
         before = self._visible_projection_signature()
-        affected = self.intents.clear_all()
-        self._cancel_watchdog()
-        _LOGGER.debug(
-            "Yeelight Pro command intents cleared on sync start: affected=%s",
-            sorted(str(node_id) for node_id in affected),
+        now = asyncio.get_running_loop().time()
+        self.pending_writes.accept_writes(message.write_ids, now=now)
+        motor_affected: set[str | int] = set()
+        for target in message.motor_targets:
+            node = self.state.nodes.get(target.node_id)
+            current = _int_or_none(node.params.get(target.current_prop)) if node is not None else None
+            motor_affected.update(self.motor.set_target(target, current_value=current, now=now))
+        for node_id in message.motor_stops:
+            motor_affected.update(self.motor.clear_node(node_id))
+        self._schedule_watchdog()
+        self._rebuild_visible_cache()
+        await self._publish_if_visible_changed(
+            StateChangeReason.PENDING_WRITE_PREPARED,
+            {"method": SyntheticSessionMethod.PENDING_WRITE_PREPARED},
+            before_visible=before,
         )
+
+    async def _fail_writes(self, message: FailPendingWritesCommand) -> None:
+        before = self._visible_projection_signature()
+        affected = self.pending_writes.fail_writes(message.write_ids)
+        self._schedule_watchdog()
+        self._rebuild_visible_cache()
         if affected:
-            self._rebuild_visible_cache()
             await self._publish_if_visible_changed(
-                StateChangeReason.COMMAND_INTENT_CLEARED,
-                {"method": SyntheticSessionMethod.COMMAND_INTENT_CLEAR},
+                StateChangeReason.PENDING_WRITE_RELEASED,
+                {"method": SyntheticSessionMethod.PENDING_WRITE_RELEASED},
                 before_visible=before,
             )
 
@@ -320,94 +277,105 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         if event.current not in {GatewaySessionState.DISCONNECTED, GatewaySessionState.CLOSING}:
             return
         before = self._visible_projection_signature()
-        affected = self.intents.clear_all()
+        affected = self.pending_writes.clear_all()
+        affected.update(self.motor.clear_all())
         self._cancel_watchdog()
-        _LOGGER.debug(
-            "Yeelight Pro command intents cleared on session state: state=%s affected=%s error=%s",
-            event.current,
-            sorted(str(node_id) for node_id in affected),
-            repr(event.error) if event.error is not None else None,
-        )
+        self._rebuild_visible_cache()
         if affected:
-            self._rebuild_visible_cache()
             await self._publish_if_visible_changed(
-                StateChangeReason.COMMAND_INTENT_CLEARED,
-                {"method": SyntheticSessionMethod.COMMAND_INTENT_CLEAR},
+                StateChangeReason.PENDING_WRITE_RELEASED,
+                {"method": SyntheticSessionMethod.PENDING_WRITE_RELEASED},
                 before_visible=before,
             )
 
-    async def _expire_command_intents(self) -> None:
-        expired = self.intents.expire_pending(now=asyncio.get_running_loop().time())
-        affected = {item.node_id for item in expired}
-        _LOGGER.debug(
-            "Yeelight Pro command intents expired, requesting refresh: expired=%s affected=%s refreshing=%s",
-            _expired_summary(expired),
-            sorted(str(node_id) for node_id in affected),
-            self.intents.refreshing_summary(),
-        )
+    async def _tick_pending(self) -> None:
+        before = self._visible_projection_signature()
+        now = asyncio.get_running_loop().time()
+        result = self.pending_writes.tick(now=now)
+        expired_motor = self.motor.expire_pending(now=now)
+        visible_affected = set(result.visible_affected)
+        visible_affected.update(track.node_id for track in expired_motor)
         self._schedule_watchdog()
-        if not affected:
-            return
-        if self._refresh_requester is None:
-            await self._resolve_expired_intent_refresh(ResolveExpiredIntentRefreshCommand(expired=expired, failed=True))
-            return
-        for item in expired:
-            node = self.state.nodes.get(item.node_id)
+        self._rebuild_visible_cache()
+        if visible_affected:
+            await self._publish_if_visible_changed(
+                StateChangeReason.PROPERTY_PUSH,
+                {"method": "gateway_settled.confirmed"},
+                before_visible=before,
+            )
+        for refresh in result.refreshes:
+            node = self.state.nodes.get(refresh.node_id)
             create_actor_task(
-                self._refresh_expired_intent(item, node_type=node.nt if node is not None else None),
-                name=f"yeelight-pro-refresh-node-{item.node_id}",
+                self._refresh_pending(refresh, node_type=node.nt if node is not None else None),
+                name=f"yeelight-pro-refresh-node-{refresh.node_id}",
+            )
+        for track in expired_motor:
+            node = self.state.nodes.get(track.node_id)
+            create_actor_task(
+                self._refresh_pending(
+                    PendingRefresh(node_id=track.node_id, write_ids={}),
+                    node_type=node.nt if node is not None else None,
+                ),
+                name=f"yeelight-pro-refresh-node-{track.node_id}",
             )
 
-    async def _refresh_expired_intent(self, item: Any, *, node_type: int | None) -> None:
+    async def _refresh_pending(self, refresh: PendingRefresh, *, node_type: int | None) -> None:
+        response: Mapping[str, Any] | None = None
         failed = False
         try:
-            await asyncio.wait_for(
+            response = await asyncio.wait_for(
                 _call_listener_strict(
                     self._refresh_requester,
                     RefreshNodeRequestedEvent(
-                        node_id=item.node_id,
+                        node_id=refresh.node_id,
                         node_type=node_type,
-                        request_generations=item.generation_by_prop(),
+                        write_ids=refresh.write_ids,
                     ),
                 ),
                 timeout=self._refresh_timeout,
             )
-        except Exception:  # noqa: BLE001 - stale fallback is intentionally conservative on refresh failure.
+        except Exception:  # noqa: BLE001 - failed refresh releases held state to latest raw evidence.
             failed = True
         try:
-            await self._ref.tell(ResolveExpiredIntentRefreshCommand(expired=(item,), failed=failed))
+            await self._ref.tell(ResolvePendingRefreshCommand(refresh=refresh, response=response, failed=failed))
         except ActorClosed:
             return
 
-    async def _resolve_expired_intent_refresh(self, message: ResolveExpiredIntentRefreshCommand) -> None:
+    async def _resolve_refresh(self, message: ResolvePendingRefreshCommand) -> None:
         before = self._visible_projection_signature()
-        affected = self.intents.resolve_expired_refresh(message.expired, failed=message.failed)
-        if not affected:
-            return
-        self._rebuild_visible_cache()
-        await self._publish_if_visible_changed(
-            StateChangeReason.COMMAND_INTENT_EXPIRED,
-            {
-                "method": SyntheticSessionMethod.COMMAND_INTENT_EXPIRED,
-                "nodes": [{"id": node_id} for node_id in affected],
-            },
-            before_visible=before,
+        affected = self.pending_writes.complete_refresh(
+            message.refresh,
+            message.response,
+            failed=message.failed,
+            now=asyncio.get_running_loop().time(),
         )
+        self._schedule_watchdog()
+        self._rebuild_visible_cache()
+        if affected:
+            await self._publish_if_visible_changed(
+                StateChangeReason.PENDING_WRITE_RELEASED,
+                {"method": SyntheticSessionMethod.PENDING_WRITE_RELEASED},
+                before_visible=before,
+            )
 
     def _schedule_watchdog(self) -> None:
         self._cancel_watchdog()
         now = asyncio.get_running_loop().time()
-        next_expiration = self.intents.next_expiration(now=now)
-        if next_expiration is None:
+        deadlines = [
+            deadline
+            for deadline in (
+                self.pending_writes.next_deadline(now=now),
+                self.motor.next_expiration(now=now),
+            )
+            if deadline is not None
+        ]
+        if not deadlines:
             return
-        _LOGGER.debug(
-            "Yeelight Pro command intent watchdog scheduled: expires_in=%.3f",
-            max(0.0, next_expiration - now),
-        )
+        deadline = min(deadlines)
         self._watchdog = self.defer_later(
-            max(0.0, next_expiration - now),
-            ExpireCommandIntentsCommand(),
-            name="yeelight-pro-device-state-intent-watchdog",
+            max(0.0, deadline - now),
+            PendingWritesTickCommand(),
+            name="yeelight-pro-device-state-pending-watchdog",
         )
 
     def _cancel_watchdog(self) -> None:
@@ -416,15 +384,10 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
             self._watchdog = None
 
     def _rebuild_visible_cache(self) -> None:
-        self._visible_nodes = {}
-        for node_id, node in self.state.nodes.items():
-            visible = self.intents.project_visible(node)
-            self._visible_nodes[node_id] = visible
-        _LOGGER.debug(
-            "Yeelight Pro visible cache rebuilt: nodes=%s stale=%s",
-            len(self._visible_nodes),
-            self.intents.stale_summary(),
-        )
+        self._visible_nodes = {node_id: self._project_visible(node) for node_id, node in self.state.nodes.items()}
+
+    def _project_visible(self, node: TopologyNode) -> TopologyNode:
+        return self.motor.visible_node(self.pending_writes.project_visible(node))
 
     async def _publish_if_visible_changed(
         self,
@@ -434,8 +397,7 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
         before_visible: VisibleProjectionSignature,
         changes: tuple[Any, ...] = (),
     ) -> None:
-        after_visible = self._visible_projection_signature()
-        if after_visible != before_visible:
+        if self._visible_projection_signature() != before_visible:
             await self._publish_snapshot(reason, message, changes)
             return
         self._log_suppressed_snapshot(reason, message, changes)
@@ -457,14 +419,13 @@ class DeviceStateActor(Actor[DeviceStateActorMessage]):
     def _visible_projection_signature(self) -> VisibleProjectionSignature:
         nodes = []
         for node_id, node in self.state.nodes.items():
-            visible = self.intents.project_visible(node)
+            visible = self._project_visible(node)
             node_key = _node_key(node_id)
             nodes.append((str(node_key if node_key is not None else node_id), _node_signature(visible)))
         return (
             tuple(sorted(nodes, key=lambda item: item[0])),
             _state_mapping_signature(self.state.groups, excluded_keys=("params",)),
             _state_mapping_signature(self.state.rooms),
-            self.intents.signature(),
         )
 
     def _log_suppressed_snapshot(
@@ -530,14 +491,13 @@ def _freeze_value(value: Any) -> object:
 
 
 def _message_summary(message: Mapping[str, Any]) -> dict[str, Any]:
-    nodes = []
     raw_nodes = list_payload(message, "nodes")
+    nodes = []
     for item in raw_nodes[:_MAX_LOG_ITEMS]:
-        node_id = _payload_node_id(item)
         params = item.get("params")
         nodes.append(
             {
-                "id": node_id,
+                "id": _payload_node_id(item),
                 "params": dict(params) if isinstance(params, Mapping) else None,
             }
         )
@@ -546,51 +506,14 @@ def _message_summary(message: Mapping[str, Any]) -> dict[str, Any]:
         "node_count": len(raw_nodes),
         "nodes": nodes,
     }
-    for key in ("id", "result"):
-        if key in message:
-            summary[key] = message.get(key)
     raw_groups = list_payload(message, "groups")
     if raw_groups:
         summary["group_count"] = len(raw_groups)
-        summary["groups"] = tuple(_summary_state_item(item) for item in raw_groups[:_MAX_LOG_ITEMS])
-    return summary
-
-
-def _summary_state_item(item: Mapping[str, Any]) -> dict[str, Any]:
-    summary: dict[str, Any] = {"id": _payload_node_id(item)}
-    for key in ("nt", "type"):
-        if key in item:
-            summary[key] = item.get(key)
-    params = item.get("params")
-    if isinstance(params, Mapping):
-        summary["params"] = dict(params)
     return summary
 
 
 def _props_by_node_summary(props_by_node: Mapping[str | int, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(node_id): dict(props) for node_id, props in props_by_node.items()}
-
-
-def _motor_targets_summary(targets: Iterable[Any]) -> tuple[dict[str, Any], ...]:
-    return tuple(
-        {
-            "node_id": str(target.node_id),
-            "current_prop": target.current_prop,
-            "target_prop": target.target_prop,
-            "target_value": target.target_value,
-        }
-        for target in targets
-    )
-
-
-def _expired_summary(expired: Iterable[Any]) -> tuple[dict[str, Any], ...]:
-    return tuple(
-        {
-            "node_id": str(item.node_id),
-            "props": tuple(item.props),
-        }
-        for item in expired
-    )
 
 
 async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
@@ -602,12 +525,15 @@ async def _call_listener(listener: Callable[..., Any], *args: Any) -> None:
         _LOGGER.exception("Yeelight Pro device state listener failed")
 
 
-async def _call_listener_strict(listener: Callable[..., Any] | None, *args: Any) -> None:
+async def _call_listener_strict(listener: Callable[..., Any] | None, *args: Any) -> Mapping[str, Any]:
     if listener is None:
         raise RuntimeError("refresh requester is not configured")
     result = listener(*args)
     if inspect.isawaitable(result):
-        await result
+        result = await result
+    if not isinstance(result, Mapping):
+        raise TypeError("refresh requester must return a gateway response")
+    return result
 
 
 def _schedule_listener(listener: Callable[..., Any], *args: Any) -> None:
