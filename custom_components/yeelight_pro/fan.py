@@ -9,8 +9,8 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
-from .core.topology import DeviceType
 from .entity import YeelightProEntity, async_set_node_props
+from .gateway.topology import DeviceType
 from .helpers import device_type
 from .platform import async_add_dynamic_entities
 

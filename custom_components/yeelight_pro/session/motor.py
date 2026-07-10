@@ -4,11 +4,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from ..core.coercion import int_or_none as _int_or_none
-from ..core.coercion import node_id_or_none
-from ..core.coercion import node_key as _node_key
-from ..core.topology import TopologyNode
-from ..core.updates import PropertyChange
+from ..gateway.coercion import int_or_none as _int_or_none
+from ..gateway.coercion import node_id_or_none
+from ..gateway.coercion import node_key as _node_key
+from ..gateway.topology import TopologyNode
+from ..gateway.updates import PropertyChange
 
 MOTOR_TRACKING_TTL = 120.0
 

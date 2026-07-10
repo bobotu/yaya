@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "custom_components"))
 
 from dev_tools.yeelight_pro_cli import async_main, main, parse_value  # noqa: E402
-from yeelight_pro.core import parse_line  # noqa: E402
+from yeelight_pro.gateway import parse_line  # noqa: E402
 
 
 class CliEntryPointTests(unittest.TestCase):

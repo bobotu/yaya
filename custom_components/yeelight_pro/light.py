@@ -20,11 +20,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DEFAULT_LIGHT_TRANSITION
 from .coordinator import YeelightProCoordinator
-from .core.commands import BlinkType
-from .core.devices import LightDevice
-from .core.devices.light import color_temp_kelvin_range
-from .core.topology import DeviceType
 from .entity import YeelightProEntity, async_call_gateway, async_set_node_props
+from .gateway.commands import BlinkType
+from .gateway.devices import LightDevice
+from .gateway.devices.light import color_temp_kelvin_range
+from .gateway.topology import DeviceType
 from .helpers import int_param, light_device_type
 from .platform import async_add_dynamic_entities
 

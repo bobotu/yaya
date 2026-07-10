@@ -38,8 +38,8 @@ from custom_components.yeelight_pro.const import (
     EVENT_YEELIGHT_PRO,
     SWITCH_MODE_WIRELESS,
 )
-from custom_components.yeelight_pro.core import GatewayEvent, NodeCommand, ProtocolError
 from custom_components.yeelight_pro.entity import YeelightProNodeUnavailableError, YeelightProProtocolActionError
+from custom_components.yeelight_pro.gateway import GatewayEvent, NodeCommand, ProtocolError
 from custom_components.yeelight_pro.helpers import node_unique_id
 from custom_components.yeelight_pro.light import YeelightProLight
 from custom_components.yeelight_pro.session import (

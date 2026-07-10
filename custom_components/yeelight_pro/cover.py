@@ -14,9 +14,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
-from .core import is_dream_curtain
-from .core.devices import CurtainDevice, DreamCurtainDevice, curtain_position_known, curtain_tilt_position_known
 from .entity import YeelightProEntity, async_call_gateway
+from .gateway import is_dream_curtain
+from .gateway.devices import CurtainDevice, DreamCurtainDevice, curtain_position_known, curtain_tilt_position_known
 from .helpers import int_param, is_cover_node, true_bool_param
 from .platform import async_add_dynamic_entities
 from .session.motor import (

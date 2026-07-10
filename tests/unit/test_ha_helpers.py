@@ -40,7 +40,7 @@ try:
     sys.modules["homeassistant"] = homeassistant
     sys.modules["homeassistant.const"] = homeassistant_const
 
-    TopologyNode = importlib.import_module("_yeelight_pro_helper_test.core.topology").TopologyNode
+    TopologyNode = importlib.import_module("_yeelight_pro_helper_test.gateway.topology").TopologyNode
     helpers = importlib.import_module("_yeelight_pro_helper_test.helpers")
 finally:
     if _homeassistant is None:

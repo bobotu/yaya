@@ -5,13 +5,6 @@ import pytest
 pytest.importorskip("homeassistant")
 pytest.importorskip("pytest_homeassistant_custom_component")
 
-from custom_components.yeelight_pro.core import (
-    ConnectionClosed,
-    ProtocolError,
-    RequestTimeout,
-    TopologyNode,
-    YeelightProError,
-)
 from custom_components.yeelight_pro.entity import (
     YeelightProGatewayTimeoutError,
     YeelightProGatewayUnavailableError,
@@ -21,6 +14,13 @@ from custom_components.yeelight_pro.entity import (
     YeelightProUnknownActionError,
     async_call_gateway,
     require_node_for_action,
+)
+from custom_components.yeelight_pro.gateway import (
+    ConnectionClosed,
+    ProtocolError,
+    RequestTimeout,
+    TopologyNode,
+    YeelightProError,
 )
 
 

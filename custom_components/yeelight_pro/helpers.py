@@ -18,9 +18,9 @@ from .const import (
     SWITCH_MODE_RELAY,
     SWITCH_MODE_WIRELESS,
 )
-from .core import GatewayEvent, TopologyNode, is_dream_curtain, is_knob_capable
-from .core.const import KNOB_EVENT_VALUES, PANEL_EVENT_VALUES, SWITCH_MORE_KEYS
-from .core.topology import DeviceType, NodeType
+from .gateway import GatewayEvent, TopologyNode, is_dream_curtain, is_knob_capable
+from .gateway.const import KNOB_EVENT_VALUES, PANEL_EVENT_VALUES, SWITCH_MORE_KEYS
+from .gateway.topology import DeviceType, NodeType
 
 
 def node_key(node_id: str | int) -> str:

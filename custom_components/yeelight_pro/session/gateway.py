@@ -5,14 +5,14 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
-from ..core.commands import MotorAction, NodeCommand, NodeSet, motor_adjust_action
-from ..core.const import DEFAULT_MESH_NODE_TYPE, GATEWAY_CONTROL_PORT
-from ..core.devices.base import Device
-from ..core.devices.factory import create_device
-from ..core.events import GatewayEvent, iter_gateway_events
-from ..core.protocol import GatewayMethod
-from ..core.topology import NodeId, TopologyNode
-from ..core.updates import PropertyChange
+from ..gateway.commands import MotorAction, NodeCommand, NodeSet, motor_adjust_action
+from ..gateway.const import DEFAULT_MESH_NODE_TYPE, GATEWAY_CONTROL_PORT
+from ..gateway.devices.base import Device
+from ..gateway.devices.factory import create_device
+from ..gateway.events import GatewayEvent, iter_gateway_events
+from ..gateway.protocol import GatewayMethod
+from ..gateway.topology import NodeId, TopologyNode
+from ..gateway.updates import PropertyChange
 from .actor import ActorRef
 from .connection import (
     CloseConnectionCommand,

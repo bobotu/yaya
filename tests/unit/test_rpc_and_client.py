@@ -13,7 +13,7 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
-from yeelight_pro.core import (  # noqa: E402
+from yeelight_pro.gateway import (  # noqa: E402
     ConnectionClosed,
     NodeSet,
     ProtocolError,

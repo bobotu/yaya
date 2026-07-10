@@ -10,7 +10,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import YeelightProCoordinator
-from .core import ConnectionClosed, ProtocolError, RequestTimeout, TopologyNode, YeelightProError
+from .gateway import ConnectionClosed, ProtocolError, RequestTimeout, TopologyNode, YeelightProError
 from .helpers import node_unique_id
 
 _LOGGER = logging.getLogger(__name__)

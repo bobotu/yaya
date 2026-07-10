@@ -6,11 +6,11 @@ from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
 from typing import Any
 
-from ..core.coercion import int_or_none as _int_or_none
-from ..core.coercion import node_id_or_none
-from ..core.protocol import GatewayMethod, list_payload
-from ..core.topology import NodeType, Topology, TopologyNode
-from ..core.updates import PropertyChange
+from ..gateway.coercion import int_or_none as _int_or_none
+from ..gateway.coercion import node_id_or_none
+from ..gateway.protocol import GatewayMethod, list_payload
+from ..gateway.topology import NodeType, Topology, TopologyNode
+from ..gateway.updates import PropertyChange
 
 
 @dataclass

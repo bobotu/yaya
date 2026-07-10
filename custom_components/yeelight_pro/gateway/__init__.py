@@ -1,4 +1,4 @@
-"""Stateless Yeelight Pro LAN protocol models and codecs."""
+"""Stateless Yeelight Pro gateway protocol models and codecs."""
 
 from .capabilities import (
     CommandCapability,

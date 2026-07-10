@@ -13,8 +13,8 @@ if sys.platform == "win32":
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
-from yeelight_pro.core import ConnectionClosed, NodeCommand, ProtocolError  # noqa: E402
-from yeelight_pro.core.commands import MotorAction, motor_adjust_action  # noqa: E402
+from yeelight_pro.gateway import ConnectionClosed, NodeCommand, ProtocolError  # noqa: E402
+from yeelight_pro.gateway.commands import MotorAction, motor_adjust_action  # noqa: E402
 from yeelight_pro.session.actor import (  # noqa: E402
     Actor,
     ActorClosed,

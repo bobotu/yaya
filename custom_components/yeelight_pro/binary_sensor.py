@@ -9,9 +9,9 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
-from .core import is_knob_capable
-from .core.topology import DeviceType
 from .entity import YeelightProEntity
+from .gateway import is_knob_capable
+from .gateway.topology import DeviceType
 from .helpers import bool_param, device_type, node_unique_id, relay_channel_numbers, relay_prop_name
 from .platform import async_add_dynamic_entities
 
