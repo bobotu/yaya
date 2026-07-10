@@ -37,7 +37,7 @@ from .session import (
     SessionEvent,
     SessionStatusChanged,
     StateChangeReason,
-    StateSnapshotChanged,
+    VisibleStateChanged,
     YeelightProGateway,
 )
 
@@ -158,7 +158,7 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         }
 
     @callback
-    def _async_handle_state_update(self, event: StateSnapshotChanged) -> None:
+    def _async_handle_state_update(self, event: VisibleStateChanged) -> None:
         self.async_set_updated_data(self._current_data())
         if event.reason == StateChangeReason.TOPOLOGY_PUSH:
             self._log_gateway_snapshot("topology push", force=True)

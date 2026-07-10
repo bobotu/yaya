@@ -16,12 +16,12 @@ from yeelight_pro.core import (  # noqa: E402
     parse_discovery_response,
     parse_line,
 )
-from yeelight_pro.session.model import (  # noqa: E402
+from yeelight_pro.session._snapshot import GatewaySnapshot  # noqa: E402
+from yeelight_pro.session.motor import (  # noqa: E402
     MOTOR_TRACKING_POSITION_MOTION,
     MOTOR_TRACKING_TARGET_POSITION,
-    GatewayState,
     MotorStateTracker,
-    MotorTargetIntent,
+    MotorTarget,
 )
 
 
@@ -60,7 +60,7 @@ class ProtocolAndStateTests(unittest.TestCase):
 
     def test_state_merges_property_push(self) -> None:
         fixture = json.loads((Path(__file__).parent / "fixtures" / "topology-direct.json").read_text())
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(fixture)
         state.apply_properties(
             {
@@ -79,7 +79,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(state.nodes["curtain-1"].params["tra"], 45)
 
     def test_topology_push_merges_without_removing_existing_nodes(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [
@@ -106,7 +106,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(state.rooms["room-1"]["n"], "Kitchen")
 
     def test_full_topology_sync_retains_missing_nodes_as_unavailable(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [
@@ -138,7 +138,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         )
 
     def test_full_property_coverage_requires_full_snapshot_marker(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [
@@ -175,7 +175,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         )
 
     def test_state_keeps_unknown_property_nodes_out_of_topology_nodes(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [
@@ -212,7 +212,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(unknown.params, {"p": True, "l": 80, "ct": 4000})
 
     def test_state_updates_unknown_property_node_summary(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_properties(
             {
                 "method": "gateway_post.prop",
@@ -237,7 +237,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         )
 
     def test_topology_claims_previously_unknown_property_node(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_properties(
             {
                 "method": "gateway_post.prop",
@@ -257,7 +257,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(state.nodes["light-1"].params, {"p": True})
 
     def test_room_id_falls_back_to_room_membership(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [{"id": "light-1", "nt": 2, "type": 3, "name": "Light"}],
@@ -269,7 +269,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(state.room_name_for_node(state.nodes["light-1"]), "Kitchen")
 
     def test_room_id_falls_back_to_room_group_membership(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [{"id": "light-1", "nt": 2, "type": 3, "name": "Light"}],
@@ -281,7 +281,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(state.room_id_for_node(state.nodes["light-1"]), "room-1")
 
     def test_room_name_looks_up_string_and_integer_ids(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology({"nodes": [], "rooms": [{"id": 1, "n": "Kitchen"}, {"id": "2", "name": "Office"}]})
 
         self.assertEqual(state.room_name("1"), "Kitchen")
@@ -290,7 +290,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertIsNone(state.room_name(None))
 
     def test_motor_tracking_uses_target_without_overwriting_current_position(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 20, "tp": 20}}],
@@ -302,7 +302,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         tracker = MotorStateTracker(ttl=30.0)
 
         affected = tracker.set_target(
-            MotorTargetIntent("curtain-1", "cp", "tp", 80),
+            MotorTarget("curtain-1", "cp", "tp", 80),
             current_value=20,
             now=1.0,
         )
@@ -314,7 +314,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(visible.params[MOTOR_TRACKING_POSITION_MOTION], "opening")
 
     def test_motor_tracking_authoritative_push_updates_direction_and_completion(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 80, "tp": 80}}],
@@ -349,7 +349,7 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertNotIn(MOTOR_TRACKING_TARGET_POSITION, visible.params)
 
     def test_motor_tracking_stop_and_expiry_clear_visible_target(self) -> None:
-        state = GatewayState()
+        state = GatewaySnapshot()
         state.apply_topology(
             {
                 "nodes": [{"id": "curtain-1", "nt": 2, "type": 6, "params": {"cp": 10}}],
@@ -360,12 +360,12 @@ class ProtocolAndStateTests(unittest.TestCase):
         )
         tracker = MotorStateTracker(ttl=5.0)
 
-        tracker.set_target(MotorTargetIntent("curtain-1", "cp", "tp", 90), current_value=10, now=1.0)
+        tracker.set_target(MotorTarget("curtain-1", "cp", "tp", 90), current_value=10, now=1.0)
         self.assertTrue(tracker.has_tracking("curtain-1"))
         self.assertEqual(tracker.clear_node("curtain-1"), {"curtain-1"})
         self.assertFalse(tracker.has_tracking("curtain-1"))
 
-        tracker.set_target(MotorTargetIntent("curtain-1", "cp", "tp", 90), current_value=10, now=10.0)
+        tracker.set_target(MotorTarget("curtain-1", "cp", "tp", 90), current_value=10, now=10.0)
         self.assertEqual(tracker.expire_pending(now=14.9), ())
         expired = tracker.expire_pending(now=15.0)
         self.assertEqual(tuple(track.node_id for track in expired), ("curtain-1",))

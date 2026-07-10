@@ -17,8 +17,8 @@ from ..core.exceptions import ProtocolError, YeelightProError
 from ..core.protocol import GatewayMethod, list_payload
 from ..core.topology import NodeId, NodeType, TopologyNode
 from ..core.updates import PropertyChange
-from .actors.base import Actor, ActorClosed, ActorRef, create_actor_task
-from .messages.connection import (
+from .actor import Actor, ActorClosed, ActorRef, create_actor_task
+from .connection import (
     ConnectConnectionCommand,
     ConnectionActorMessage,
     ConnectionLostEvent,
@@ -26,23 +26,29 @@ from .messages.connection import (
     GatewayRpcRequest,
     RpcPushEvent,
 )
-from .messages.enums import FullSyncSource, StateChangeReason, SyntheticSessionMethod
-from .messages.public import GatewayEventReceived, SessionStatusChanged, StateSnapshotChanged
-from .model.motor import (
+from .events import (
+    FullSyncSource,
+    GatewayEventReceived,
+    SessionStatusChanged,
+    StateChangeReason,
+    SyntheticSessionMethod,
+    VisibleStateChanged,
+)
+from .motor import (
     MOTOR_CURRENT_ANGLE_PROP,
     MOTOR_CURRENT_POSITION_PROP,
     MOTOR_TARGET_ANGLE_PROP,
     MOTOR_TARGET_POSITION_PROP,
     MOTOR_TRACKING_TTL,
     MotorStateTracker,
-    MotorTargetIntent,
+    MotorTarget,
 )
-from .model.status import GatewaySessionState
 from .state import StateResult, StateStore
+from .status import GatewaySessionState
 
 JSONDict = dict[str, Any]
 SessionStatusListener = Callable[[SessionStatusChanged], Awaitable[None] | None]
-StateListener = Callable[[StateSnapshotChanged], Awaitable[None] | None]
+StateListener = Callable[[VisibleStateChanged], Awaitable[None] | None]
 PropertyListener = Callable[[PropertyChange], Awaitable[None] | None]
 GatewayEventListener = Callable[[GatewayEventReceived], Awaitable[None] | None]
 _LOGGER = logging.getLogger(__name__)
@@ -861,7 +867,7 @@ class GatewaySession(Actor[Any]):
         message: Mapping[str, Any],
         changes: tuple[PropertyChange, ...],
     ) -> None:
-        event = StateSnapshotChanged(reason=reason, message=message, changes=changes)
+        event = VisibleStateChanged(reason=reason, message=message, changes=changes)
         for listener in list(self._state_listeners):
             _schedule_listener(listener, event)
 
@@ -1086,8 +1092,8 @@ def _merge_state_targets(requests: Iterable[_WriteRequest]) -> dict[NodeId, dict
 
 def _motor_tracking_from_payload(
     payload: Iterable[Mapping[str, Any]],
-) -> tuple[list[MotorTargetIntent], list[NodeId]]:
-    targets: list[MotorTargetIntent] = []
+) -> tuple[list[MotorTarget], list[NodeId]]:
+    targets: list[MotorTarget] = []
     stops: list[NodeId] = []
     for item in payload:
         node_id = _item_id(item)
@@ -1098,7 +1104,7 @@ def _motor_tracking_from_payload(
             position = _int_or_none(props.get(MOTOR_TARGET_POSITION_PROP))
             if position is not None:
                 targets.append(
-                    MotorTargetIntent(
+                    MotorTarget(
                         node_id=node_id,
                         current_prop=MOTOR_CURRENT_POSITION_PROP,
                         target_prop=MOTOR_TARGET_POSITION_PROP,
@@ -1108,7 +1114,7 @@ def _motor_tracking_from_payload(
             angle = _int_or_none(props.get(MOTOR_TARGET_ANGLE_PROP))
             if angle is not None:
                 targets.append(
-                    MotorTargetIntent(
+                    MotorTarget(
                         node_id=node_id,
                         current_prop=MOTOR_CURRENT_ANGLE_PROP,
                         target_prop=MOTOR_TARGET_ANGLE_PROP,

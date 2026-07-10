@@ -1,33 +1,31 @@
 """Stateful Yeelight Pro gateway session management."""
 
-from .gateway import YeelightProGateway
-from .messages import (
+from .events import (
     FullSyncSource,
     GatewayEventReceived,
     SessionEvent,
     SessionStatusChanged,
     StateChangeReason,
-    StateSnapshotChanged,
     SyntheticSessionMethod,
+    VisibleStateChanged,
 )
-from .model import GatewaySessionState, GatewayState, UnknownPropertyNode
+from .gateway import YeelightProGateway
+from .rpc import GatewayRPC
 from .state import PendingBatch, StateResult, StateStore
-from .transport import GatewayRPC
+from .status import GatewaySessionState
 
 __all__ = [
-    "GatewayRPC",
-    "GatewaySessionState",
-    "GatewayState",
     "FullSyncSource",
     "GatewayEventReceived",
+    "GatewayRPC",
+    "GatewaySessionState",
+    "PendingBatch",
     "SessionEvent",
     "SessionStatusChanged",
     "StateChangeReason",
-    "StateSnapshotChanged",
     "StateResult",
     "StateStore",
     "SyntheticSessionMethod",
-    "UnknownPropertyNode",
-    "PendingBatch",
+    "VisibleStateChanged",
     "YeelightProGateway",
 ]

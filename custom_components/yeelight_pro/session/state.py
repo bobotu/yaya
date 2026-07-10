@@ -6,7 +6,7 @@ from typing import Any, TypeAlias
 
 from ..core.protocol import GatewayMethod, list_payload
 from ..core.topology import NodeId, Topology, TopologyNode
-from .model.state import GatewayState, UnknownPropertyNode
+from ._snapshot import GatewaySnapshot, UnknownPropertyNode
 
 PropertyKey: TypeAlias = tuple[str, str]
 
@@ -40,7 +40,7 @@ class StateStore:
     """Own raw gateway observations, HA-visible nodes, and pending write holds."""
 
     def __init__(self) -> None:
-        self.raw = GatewayState()
+        self.raw = GatewaySnapshot()
         self.visible_nodes: dict[NodeId, TopologyNode] = {}
         self._batches: dict[int, PendingBatch] = {}
         self._owner: dict[PropertyKey, int] = {}

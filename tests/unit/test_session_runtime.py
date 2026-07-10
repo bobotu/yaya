@@ -15,19 +15,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"
 
 from yeelight_pro.core import ConnectionClosed, NodeCommand, ProtocolError  # noqa: E402
 from yeelight_pro.core.commands import MotorAction, motor_adjust_action  # noqa: E402
-from yeelight_pro.session.actors import (  # noqa: E402
+from yeelight_pro.session.actor import (  # noqa: E402
     Actor,
     ActorClosed,
     ActorReentrancyError,
     ActorRef,
     create_actor_task,
 )
-from yeelight_pro.session.messages import (  # noqa: E402
+from yeelight_pro.session.connection import (  # noqa: E402
     ConnectionLostEvent,
     GatewayRpcRequest,
     RpcPushEvent,
 )
-from yeelight_pro.session.model import (  # noqa: E402
+from yeelight_pro.session.motor import (  # noqa: E402
     MOTOR_TRACKING_POSITION_MOTION,
     MOTOR_TRACKING_TARGET_POSITION,
 )

@@ -46,10 +46,10 @@ from custom_components.yeelight_pro.session import (
     GatewaySessionState,
     SessionStatusChanged,
     StateChangeReason,
-    StateSnapshotChanged,
     StateStore,
+    VisibleStateChanged,
 )
-from custom_components.yeelight_pro.session.model import (
+from custom_components.yeelight_pro.session.motor import (
     MOTOR_TRACKING_ANGLE_MOTION,
     MOTOR_TRACKING_TARGET_ANGLE,
 )
@@ -264,7 +264,7 @@ class FakeGateway:
             self._notify_state({"method": "gateway_write.expired"})
 
     def _notify_state(self, message: dict[str, Any]) -> None:
-        event = StateSnapshotChanged(reason=_state_reason(message), message=message)
+        event = VisibleStateChanged(reason=_state_reason(message), message=message)
         for listener in list(self._state_listeners):
             listener(event)
 
@@ -290,7 +290,7 @@ class FakeGateway:
         self.state.apply_topology(fixture)
         for listener in list(self._state_listeners):
             listener(
-                StateSnapshotChanged(
+                VisibleStateChanged(
                     reason=StateChangeReason.TOPOLOGY_SYNC,
                     message={"method": "gateway_sync.topology"},
                 )
@@ -301,7 +301,7 @@ class FakeGateway:
         self.state.apply_topology(fixture, replace_existing=False)
         for listener in list(self._state_listeners):
             listener(
-                StateSnapshotChanged(
+                VisibleStateChanged(
                     reason=StateChangeReason.TOPOLOGY_PUSH,
                     message={"method": "gateway_post.topology"},
                 )

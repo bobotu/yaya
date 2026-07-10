@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any, TypeAlias
+
+from ..core.events import GatewayEvent
+from ..core.updates import PropertyChange
+from .status import GatewaySessionState
 
 
 class StateChangeReason(StrEnum):
@@ -35,3 +42,25 @@ class SyntheticSessionMethod(StrEnum):
     WRITE_EXPIRED = "gateway_write.expired"
     MOTOR_TRACKING_EXPIRED = "gateway_motor.expired"
     SESSION_RESET = "gateway_session.reset"
+
+
+@dataclass(frozen=True)
+class SessionStatusChanged:
+    previous: GatewaySessionState
+    current: GatewaySessionState
+    error: BaseException | None = None
+
+
+@dataclass(frozen=True)
+class VisibleStateChanged:
+    reason: StateChangeReason
+    message: Mapping[str, Any]
+    changes: tuple[PropertyChange, ...] = ()
+
+
+@dataclass(frozen=True)
+class GatewayEventReceived:
+    event: GatewayEvent
+
+
+SessionEvent: TypeAlias = SessionStatusChanged | VisibleStateChanged | GatewayEventReceived

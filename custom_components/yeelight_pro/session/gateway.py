@@ -13,29 +13,28 @@ from ..core.events import GatewayEvent, iter_gateway_events
 from ..core.protocol import GatewayMethod
 from ..core.topology import NodeId, TopologyNode
 from ..core.updates import PropertyChange
-from .actors import ActorRef, ConnectionActor
-from .messages import (
+from .actor import ActorRef
+from .connection import (
     CloseConnectionCommand,
-    FullSyncSource,
-    GatewayEventReceived,
+    ConnectionActor,
     GatewayRpcRequest,
-    SessionEvent,
     StartConnectionCommand,
-    StateSnapshotChanged,
 )
-from .model import MOTOR_TRACKING_TTL, GatewaySessionState
+from .events import FullSyncSource, GatewayEventReceived, SessionEvent, VisibleStateChanged
+from .motor import MOTOR_TRACKING_TTL
+from .rpc import GatewayRPC
 from .runtime import (
     DEFAULT_STATE_DEADLINE,
     DEFAULT_STATE_READBACK_DELAY,
     GatewaySession,
 )
-from .transport import GatewayRPC
+from .status import GatewaySessionState
 
 JSONDict = dict[str, Any]
 WriteCallback = Callable[[], None]
 EventListener = Callable[[GatewayEvent], Awaitable[None] | None]
 PropertyListener = Callable[[PropertyChange], Awaitable[None] | None]
-StateListener = Callable[[StateSnapshotChanged], Awaitable[None] | None]
+StateListener = Callable[[VisibleStateChanged], Awaitable[None] | None]
 SessionListener = Callable[[SessionEvent], Awaitable[None] | None]
 
 

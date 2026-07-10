@@ -9,7 +9,7 @@ from .topology import NodeId, TopologyNode
 
 @dataclass(frozen=True)
 class PropertyChange:
-    """One node changed by a gateway_post.prop push."""
+    """One HA-visible node change released by the session state store."""
 
     id: NodeId
     before: TopologyNode | None

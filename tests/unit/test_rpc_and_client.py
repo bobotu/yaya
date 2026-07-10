@@ -25,8 +25,8 @@ from yeelight_pro.session import (
     GatewayRPC,  # noqa: E402
     YeelightProGateway,  # noqa: E402
 )
-from yeelight_pro.session.messages import RpcPushEvent  # noqa: E402
-from yeelight_pro.session.model import MOTOR_TRACKING_TARGET_POSITION  # noqa: E402
+from yeelight_pro.session.connection import RpcPushEvent  # noqa: E402
+from yeelight_pro.session.motor import MOTOR_TRACKING_TARGET_POSITION  # noqa: E402
 
 
 class RpcClientTests(unittest.IsolatedAsyncioTestCase):
@@ -415,7 +415,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             await rpc.connect()
-            with self.assertLogs("yeelight_pro.session.transport.rpc", level="ERROR"):
+            with self.assertLogs("yeelight_pro.session.rpc", level="ERROR"):
                 response = await rpc.request("gateway_get.topology", on_written=broken_callback)
         finally:
             await rpc.close()
@@ -1036,7 +1036,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         try:
             rpc.add_push_listener(broken_listener)
             rpc.add_push_listener(messages.append)
-            with self.assertLogs("yeelight_pro.session.transport.rpc", level="ERROR"):
+            with self.assertLogs("yeelight_pro.session.rpc", level="ERROR"):
                 await rpc.connect()
                 await asyncio.sleep(0.1)
         finally:
@@ -1132,7 +1132,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError("unreachable")
 
         rpc = GatewayRPC("192.0.2.1", port=65443, request_timeout=0.01)
-        with patch("yeelight_pro.session.transport.rpc.asyncio.open_connection", side_effect=stalled_open_connection):
+        with patch("yeelight_pro.session.rpc.asyncio.open_connection", side_effect=stalled_open_connection):
             with self.assertRaises(RequestTimeout) as ctx:
                 await rpc.connect()
 
