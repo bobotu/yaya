@@ -12,8 +12,11 @@ DEFAULT_RECONNECT_DELAY = 5.0
 DEFAULT_HEARTBEAT_WATCHDOG_INTERVAL = timedelta(minutes=11, seconds=30)
 
 CONF_IMPORT_ROOM_IDS = "import_room_ids"
+CONF_DEFAULT_LIGHT_TRANSITION = "default_light_transition"
 CONF_SWITCH_MODES = "switch_modes"
 CONF_WIRELESS_SWITCH_NODE_IDS = "wireless_switch_node_ids"
+
+DEFAULT_LIGHT_TRANSITION = 0.5
 
 SWITCH_MODE_RELAY = "relay"
 SWITCH_MODE_WIRELESS = "wireless"

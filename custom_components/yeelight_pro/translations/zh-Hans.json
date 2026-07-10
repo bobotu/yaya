@@ -13,10 +13,12 @@
         "title": "导入过滤",
         "description": "选择要从哪些网关房间导入设备。房间留空表示导入全部设备。",
         "data": {
+          "default_light_transition": "默认灯光过渡时间",
           "import_room_ids": "导入房间",
           "wireless_switch_node_ids": "无线开关模式设备"
         },
         "data_description": {
+          "default_light_transition": "用于未指定过渡时间的灯光开启和关闭命令。",
           "import_room_ids": "留空表示导入全部房间。",
           "wireless_switch_node_ids": "选中的继电器开关会作为可编程情景开关暴露；未选中的开关会作为可控制的继电器开关暴露。"
         }
@@ -35,10 +37,12 @@
         "title": "导入过滤",
         "description": "选择要从哪些网关房间导入设备。房间留空表示导入全部设备。",
         "data": {
+          "default_light_transition": "默认灯光过渡时间",
           "import_room_ids": "导入房间",
           "wireless_switch_node_ids": "无线开关模式设备"
         },
         "data_description": {
+          "default_light_transition": "用于未指定过渡时间的灯光开启和关闭命令。",
           "import_room_ids": "留空表示导入全部房间。",
           "wireless_switch_node_ids": "选中的继电器开关会作为可编程情景开关暴露；未选中的开关会作为可控制的继电器开关暴露。"
         }
