@@ -13,5 +13,3 @@ build/
 dist/
 htmlcov/
 tmp/
-.tmp_deploy/
-.migration/state-engine-v2/private/

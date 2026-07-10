@@ -53,6 +53,11 @@ Home Assistant custom integration under `custom_components/yeelight_pro`.
 The client is read-only until caller code explicitly invokes write methods such
 as `set_prop()` or a typed device control method.
 
+The gateway acknowledgement and state-reporting model requires a bounded,
+non-optimistic synchronization layer. See
+[State synchronization](docs/state-synchronization.md) for the public state
+contract and runtime data flow.
+
 ## Home Assistant installation
 
 The integration domain is `yeelight_pro`, and the installable custom component
