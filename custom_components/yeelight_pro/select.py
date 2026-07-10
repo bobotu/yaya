@@ -53,10 +53,6 @@ class YeelightProBathModeSelect(YeelightProEntity, SelectEntity):
         super().__init__(coordinator, node, "bath_mode")
 
     @property
-    def intent_properties(self) -> tuple[str, ...]:
-        return ("bhm",)
-
-    @property
     def current_option(self) -> str | None:
         node = self.node
         if node is None:

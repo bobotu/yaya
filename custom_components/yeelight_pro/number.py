@@ -110,10 +110,6 @@ class YeelightProPropertyNumber(YeelightProEntity, NumberEntity):
         self.entity_description = description
 
     @property
-    def intent_properties(self) -> tuple[str, ...]:
-        return (self.entity_description.key,)
-
-    @property
     def native_value(self) -> float | None:
         node = self.node
         if node is None:

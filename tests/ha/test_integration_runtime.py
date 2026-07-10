@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -354,6 +355,38 @@ async def test_relay_switch_service_uses_intent_state_until_gateway_push(
         await hass.async_block_till_done()
         assert hass.states.get(switch_entity_id).state == "off"
         assert not gateway.has_pending_intent("switch-1", ["2-sp"])
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_pending_intent_without_visible_change_does_not_change_ha_state(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        before = hass.states.get(light_entity_id)
+        assert before is not None
+        assert "assumed_state" not in before.attributes
+
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {ATTR_ENTITY_ID: light_entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+        after = hass.states.get(light_entity_id)
+        assert after is not None
+        assert gateway.has_pending_intent("light-1", ["p"])
+        assert after.state == before.state
+        assert after.attributes == before.attributes
+        assert after.last_updated == before.last_updated
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -1050,6 +1083,33 @@ async def test_light_uses_product_specific_color_temperature_range(
         assert state is not None
         assert state.attributes["min_color_temp_kelvin"] == 1600
         assert state.attributes["max_color_temp_kelvin"] == 8000
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_entity_inherits_non_polling_and_reads_committed_coordinator_data(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        coordinator = entry.runtime_data
+        node = coordinator.node("light-1")
+        assert node is not None
+        entity = YeelightProLight(coordinator, node)
+        committed_node = entity.node
+
+        assert entity.should_poll is False
+        assert entity.is_on is True
+
+        gateway.state.nodes["light-1"] = replace(gateway.state.nodes["light-1"], params={"p": False})
+
+        assert gateway.visible_node("light-1").params["p"] is False
+        assert entity.node is committed_node
+        assert entity.is_on is True
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
