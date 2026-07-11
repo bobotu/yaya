@@ -84,6 +84,17 @@ def test_ack_projects_target_until_it_is_observed() -> None:
     assert not store.has_pending("light-a")
 
 
+def test_ack_can_rebase_deadline_to_command_acceptance() -> None:
+    store = _state(("light-a", 2, {"p": False}, True))
+    batch_id, _result = _prepare(store, {"light-a": {"p": True}}, deadline=5.0)
+
+    store.accept_batch(batch_id, deadline=12.0)
+
+    assert store.next_deadline() == 12.0
+    assert not store.expire_due(now=11.9).ended_batch_ids
+    assert store.expire_due(now=12.0).ended_batch_ids == (batch_id,)
+
+
 def test_equal_baseline_still_creates_a_hold_against_late_opposite_state() -> None:
     store = _state(("light-a", 2, {"p": True}, True))
 

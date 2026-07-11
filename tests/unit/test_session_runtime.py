@@ -352,6 +352,30 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gateway_get.group", [request.method for request in connection.requests])
         self.assertNotIn("gateway_get.node", [request.method for request in connection.requests])
 
+    async def test_transition_and_batch_delay_postpone_readback_and_deadline(self) -> None:
+        connection = FakeConnectionRef()
+        connection.node_responses["light-a"] = {"nodes": [{"id": "light-a", "nt": 2, "o": True, "params": {"l": 80}}]}
+        session = self.session(
+            connection,
+            set_prop_batch_delay=0,
+            state_readback_delay=0.01,
+            state_deadline=0.03,
+        )
+        session.store.apply_topology(_topology(("light-a", 2, {"l": 20})))
+
+        await session.submit_commands(
+            [NodeCommand(id="light-a", nt=2, props={"l": 80}, duration=100, delay=50)],
+        )
+        await asyncio.sleep(0.08)
+
+        self.assertTrue(session.has_pending_write("light-a"))
+        self.assertNotIn("gateway_get.node", [request.method for request in connection.requests])
+
+        await asyncio.sleep(0.12)
+
+        self.assertFalse(session.has_pending_write("light-a"))
+        self.assertIn("gateway_get.node", [request.method for request in connection.requests])
+
     async def test_deadline_releases_latest_raw_without_unavailable(self) -> None:
         connection = FakeConnectionRef()
         connection.node_responses["light-a"] = {"nodes": [{"id": "light-a", "nt": 2, "o": True, "params": {"l": 40}}]}

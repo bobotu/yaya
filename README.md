@@ -53,8 +53,8 @@ Home Assistant custom integration under `custom_components/yeelight_pro`.
 The client is read-only until caller code explicitly invokes write methods such
 as `set_prop()` or a typed device control method.
 
-The gateway acknowledgement and state-reporting model requires a bounded,
-non-optimistic synchronization layer. See
+The gateway acknowledgement and state-reporting model requires bounded
+acknowledged-write projection followed by observation-based reconciliation. See
 [State synchronization](docs/state-synchronization.md) for the public state
 contract and runtime data flow.
 
@@ -128,13 +128,19 @@ its existing entities remain registered but become unavailable.
   when topology does not expose `ch_num` or `cids`. In that case the HA device
   trigger list intentionally exposes key/idx `1..6` so real events are not
   hidden from the automation UI.
-- A gateway push that conflicts with a pending command intent does not
-  immediately override the optimistic visible state. The LAN protocol does not
+- After the gateway acknowledges a property write, its target is projected to
+  Home Assistant while the integration waits for a matching observation. The
+  LAN protocol does not
   attach timestamps, sequence numbers, or command correlation ids to pushes, so
   a delayed full/changed-state sync can be indistinguishable from a fresh
-  external change. The integration keeps the command target visible until the
-  intent TTL expires, then marks the node unavailable and issues an
-  authoritative `get_node` refresh to resolve the actual state.
+  external change. Conflicting observations update the internal raw snapshot
+  without making the visible state jump. A delayed node/group readback and a
+  bounded deadline eventually confirm the target or expose the latest observed
+  state; neither path marks the node unavailable.
+- Closely timed light writes share one gateway request. A configurable per-node
+  delay, 75 ms by default, compensates for sequential mesh dispatch so larger
+  multi-light operations begin more nearly together. Set it to 0 to disable
+  compensation.
 
 ## CLI
 
