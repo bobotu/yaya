@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from ..gateway.commands import MotorAction, NodeCommand, NodeSet, motor_adjust_action
-from ..gateway.const import DEFAULT_MESH_NODE_TYPE, GATEWAY_CONTROL_PORT
+from ..gateway.const import DEFAULT_LIGHT_BATCH_DELAY_STEP_MS, DEFAULT_MESH_NODE_TYPE, GATEWAY_CONTROL_PORT
 from ..gateway.devices.base import Device
 from ..gateway.devices.factory import create_device
 from ..gateway.events import GatewayEvent, iter_gateway_events
@@ -49,6 +49,7 @@ class YeelightProGateway:
         request_timeout: float = 5.0,
         reconnect_delay: float = 2.0,
         set_prop_batch_delay: float = 0.01,
+        light_batch_delay_step_ms: int = DEFAULT_LIGHT_BATCH_DELAY_STEP_MS,
         state_readback_delay: float = DEFAULT_STATE_READBACK_DELAY,
         state_deadline: float = DEFAULT_STATE_DEADLINE,
         motor_tracking_ttl: float = MOTOR_TRACKING_TTL,
@@ -66,6 +67,7 @@ class YeelightProGateway:
         self._session = GatewaySession(
             connection_ref=self._connection_ref,
             set_prop_batch_delay=set_prop_batch_delay,
+            light_batch_delay_step_ms=light_batch_delay_step_ms,
             state_readback_delay=state_readback_delay,
             state_deadline=state_deadline,
             motor_tracking_ttl=motor_tracking_ttl,

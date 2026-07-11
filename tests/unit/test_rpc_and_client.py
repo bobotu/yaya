@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"
 
 from yeelight_pro.gateway import (  # noqa: E402
     ConnectionClosed,
+    NodeCommand,
     NodeSet,
     ProtocolError,
     ProtocolFrameTooLarge,
@@ -258,6 +259,147 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([request["method"] for request in received], ["gateway_set.prop"])
         self.assertEqual(received[0]["nodes"], [{"id": "light-1", "nt": 2, "set": {"p": True, "l": 42}}])
 
+    async def test_set_prop_batcher_compensates_timed_light_dispatch_delay(self) -> None:
+        received: list[dict[str, Any]] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                request = parse_line(await reader.readline())
+                received.append(request)
+                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode())
+                writer.write(b"\r\n")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
+
+        try:
+            await gateway.connect()
+            await asyncio.gather(
+                gateway.set_node_props("light-1", {"l": 20, "ct": 2700}, duration=500),
+                gateway.set_node_props("light-2", {"l": 20, "ct": 2700}, duration=500),
+                gateway.set_node_props("light-3", {"l": 20, "ct": 2700}, duration=500),
+            )
+        finally:
+            await gateway.close()
+
+        self.assertEqual([request["method"] for request in received], ["gateway_set.prop"])
+        self.assertEqual(
+            received[0]["nodes"],
+            [
+                {"id": "light-1", "nt": 2, "duration": 500, "delay": 150, "set": {"l": 20, "ct": 2700}},
+                {"id": "light-2", "nt": 2, "duration": 500, "delay": 75, "set": {"l": 20, "ct": 2700}},
+                {"id": "light-3", "nt": 2, "duration": 500, "delay": 0, "set": {"l": 20, "ct": 2700}},
+            ],
+        )
+
+    async def test_set_prop_batcher_does_not_delay_single_timed_light(self) -> None:
+        received: list[dict[str, Any]] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                request = parse_line(await reader.readline())
+                received.append(request)
+                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode())
+                writer.write(b"\r\n")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0)
+
+        try:
+            await gateway.connect()
+            await gateway.set_node_props("light-1", {"p": False}, duration=500)
+        finally:
+            await gateway.close()
+
+        self.assertEqual(
+            received[0]["nodes"],
+            [{"id": "light-1", "nt": 2, "duration": 500, "set": {"p": False}}],
+        )
+
+    async def test_set_prop_batcher_can_disable_light_delay_compensation(self) -> None:
+        received: list[dict[str, Any]] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                request = parse_line(await reader.readline())
+                received.append(request)
+                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode())
+                writer.write(b"\r\n")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(
+            host,
+            port=port,
+            set_prop_batch_delay=0.02,
+            light_batch_delay_step_ms=0,
+        )
+
+        try:
+            await gateway.connect()
+            await asyncio.gather(
+                gateway.set_node_props("light-1", {"l": 20}, duration=500),
+                gateway.set_node_props("light-2", {"l": 20}, duration=500),
+            )
+        finally:
+            await gateway.close()
+
+        self.assertEqual(
+            received[0]["nodes"],
+            [
+                {"id": "light-1", "nt": 2, "duration": 500, "set": {"l": 20}},
+                {"id": "light-2", "nt": 2, "duration": 500, "set": {"l": 20}},
+            ],
+        )
+
+    async def test_set_prop_batcher_preserves_explicit_light_delay(self) -> None:
+        received: list[dict[str, Any]] = []
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                request = parse_line(await reader.readline())
+                received.append(request)
+                writer.write(json.dumps({"id": request["id"], "result": "ok"}, separators=(",", ":")).encode())
+                writer.write(b"\r\n")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        host, port = await self.start_gateway(handler)
+        gateway = YeelightProGateway(host, port=port, set_prop_batch_delay=0.02)
+
+        try:
+            await gateway.connect()
+            await asyncio.gather(
+                gateway.send_node_command(NodeCommand(id="light-1", nt=2, props={"p": True}, duration=500, delay=250)),
+                gateway.set_node_props("light-2", {"p": True}, duration=500),
+            )
+        finally:
+            await gateway.close()
+
+        self.assertEqual(
+            received[0]["nodes"],
+            [
+                {"id": "light-1", "nt": 2, "duration": 500, "delay": 250, "set": {"p": True}},
+                {"id": "light-2", "nt": 2, "duration": 500, "set": {"p": True}},
+            ],
+        )
+
     async def test_set_prop_batcher_splits_conflicting_property_targets(self) -> None:
         received: list[dict[str, Any]] = []
 
@@ -422,7 +564,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response["result"], "ok")
 
-    async def test_set_node_props_holds_observed_state_until_target_push(self) -> None:
+    async def test_set_node_props_projects_ack_target_and_suppresses_stale_push(self) -> None:
         allow_target = asyncio.Event()
 
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -461,7 +603,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await gateway.set_node_props("light-1", {"p": False})
             await asyncio.sleep(0.02)
 
-            self.assertTrue(gateway.visible_node("light-1").params["p"])
+            self.assertFalse(gateway.visible_node("light-1").params["p"])
             self.assertTrue(gateway.has_pending_write("light-1", ["p"]))
 
             allow_target.set()

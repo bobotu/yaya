@@ -14,8 +14,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import (
     CONF_DEFAULT_LIGHT_TRANSITION,
     CONF_IMPORT_ROOM_IDS,
+    CONF_LIGHT_BATCH_DELAY_STEP_MS,
     CONF_SWITCH_MODES,
     DEFAULT_HEARTBEAT_WATCHDOG_INTERVAL,
+    DEFAULT_LIGHT_BATCH_DELAY_STEP_MS,
     DEFAULT_LIGHT_TRANSITION,
     DEFAULT_RECONNECT_DELAY,
     DEFAULT_REQUEST_TIMEOUT,
@@ -84,6 +86,9 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
             port=self.port,
             request_timeout=DEFAULT_REQUEST_TIMEOUT,
             reconnect_delay=DEFAULT_RECONNECT_DELAY,
+            light_batch_delay_step_ms=entry.options.get(
+                CONF_LIGHT_BATCH_DELAY_STEP_MS, DEFAULT_LIGHT_BATCH_DELAY_STEP_MS
+            ),
         )
         self._stopped = False
         self._remove_event_listener: Callable[[], None] | None = None

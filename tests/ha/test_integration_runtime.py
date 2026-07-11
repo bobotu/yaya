@@ -141,7 +141,8 @@ class FakeGateway:
             {node_id: props},
             deadline=asyncio.get_running_loop().time() + 10.0,
         )
-        self._pending_batch_by_node[str(node_id)] = batch_id
+        if batch_id is not None:
+            self._pending_batch_by_node[str(node_id)] = batch_id
         self._forget_ended(result)
         if result.visible_changed:
             self._notify_state({"method": "gateway_write.superseded"})
@@ -155,15 +156,17 @@ class FakeGateway:
             if self.next_set_node_props_error is not None:
                 error = self.next_set_node_props_error
                 self.next_set_node_props_error = None
-                result = self.state.fail_batch(batch_id)
+                if batch_id is not None:
+                    result = self.state.fail_batch(batch_id)
+                    self._forget_ended(result)
+                    if result.visible_changed:
+                        self._notify_state({"method": "gateway_write.failed"})
+                raise error
+            if batch_id is not None:
+                result = self.state.accept_batch(batch_id)
                 self._forget_ended(result)
                 if result.visible_changed:
-                    self._notify_state({"method": "gateway_write.failed"})
-                raise error
-            result = self.state.accept_batch(batch_id)
-            self._forget_ended(result)
-            if result.visible_changed:
-                self._notify_state({"method": "gateway_write.accepted"})
+                    self._notify_state({"method": "gateway_write.accepted"})
             return {"result": "ok"}
         finally:
             self._active_set_node_props -= 1
@@ -353,7 +356,7 @@ def topology_fixture() -> dict[str, Any]:
     return fixture
 
 
-async def test_relay_switch_service_holds_observed_state_until_gateway_push(
+async def test_relay_switch_service_projects_acknowledged_target_until_gateway_push(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -375,7 +378,7 @@ async def test_relay_switch_service_holds_observed_state_until_gateway_push(
         await hass.async_block_till_done()
 
         assert gateway.commands[-1].to_payload()["set"] == {"2-sp": False}
-        assert hass.states.get(switch_entity_id).state == STATE_ON
+        assert hass.states.get(switch_entity_id).state == STATE_OFF
         assert gateway.has_pending_write("switch-1", ["2-sp"])
 
         gateway.update_node_params("switch-1", {"2-sp": False})
@@ -387,7 +390,7 @@ async def test_relay_switch_service_holds_observed_state_until_gateway_push(
         await hass.async_block_till_done()
 
 
-async def test_pending_write_without_visible_change_does_not_change_ha_state(
+async def test_pending_write_for_current_value_does_not_republish_ha_state(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -436,13 +439,13 @@ async def test_relay_switch_conflicting_gateway_push_resolves_at_write_deadline(
             blocking=True,
         )
         await hass.async_block_till_done()
-        assert hass.states.get(switch_entity_id).state == STATE_ON
+        assert hass.states.get(switch_entity_id).state == STATE_OFF
         assert gateway.has_pending_write("switch-1", ["2-sp"])
 
         gateway.update_node_params("switch-1", {"2-sp": True})
         await hass.async_block_till_done()
 
-        assert hass.states.get(switch_entity_id).state == STATE_ON
+        assert hass.states.get(switch_entity_id).state == STATE_OFF
         assert gateway.has_pending_write("switch-1", ["2-sp"])
 
         gateway.expire_pending_writes()
@@ -1012,12 +1015,12 @@ async def test_light_service_maps_transition_and_flash(
             blocking=True,
         )
         await hass.async_block_till_done()
-        assert gateway.commands[-1].to_payload()["set"] == {"p": True, "l": 50, "ct": 3000}
+        assert gateway.commands[-1].to_payload()["set"] == {"l": 50, "ct": 3000}
         assert gateway.commands[-1].to_payload()["duration"] == 1500
         state = hass.states.get(light_entity_id)
         assert state.state == STATE_ON
-        assert state.attributes["brightness"] == 204
-        assert state.attributes["color_temp_kelvin"] == 4000
+        assert state.attributes["brightness"] == 128
+        assert state.attributes["color_temp_kelvin"] == 3000
 
         gateway.update_node_params("light-1", {"p": True, "l": 50, "ct": 3000})
         await hass.async_block_till_done()
@@ -1034,7 +1037,7 @@ async def test_light_service_maps_transition_and_flash(
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"p": False}
         assert gateway.commands[-1].to_payload()["duration"] == 2000
-        assert hass.states.get(light_entity_id).state == STATE_ON
+        assert hass.states.get(light_entity_id).state == STATE_OFF
 
         gateway.update_node_params("light-1", {"p": False})
         await hass.async_block_till_done()
@@ -1092,8 +1095,8 @@ async def test_light_service_fans_out_multiple_entities_concurrently(
         await hass.async_block_till_done()
 
         assert [command.to_payload()["set"] for command in gateway.commands[-2:]] == [{"p": False}, {"p": False}]
-        assert hass.states.get(first_light_id).state == STATE_ON
-        assert hass.states.get(second_light_id).state == STATE_ON
+        assert hass.states.get(first_light_id).state == STATE_OFF
+        assert hass.states.get(second_light_id).state == STATE_OFF
 
         gateway.update_node_params("light-1", {"p": False})
         gateway.update_node_params("light-2", {"p": False})
@@ -1218,7 +1221,7 @@ async def test_light_action_raises_when_current_node_is_unavailable(
         await hass.async_block_till_done()
 
 
-async def test_light_service_holds_observed_state_through_intermediate_push(
+async def test_light_service_projects_acknowledged_target_through_intermediate_push(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -1242,19 +1245,22 @@ async def test_light_service_holds_observed_state_through_intermediate_push(
 
         state = hass.states.get(light_entity_id)
         assert state.state == STATE_ON
-        assert state.attributes["brightness"] == 204
-        assert state.attributes["color_temp_kelvin"] == 4000
-        assert gateway.has_pending_write("light-1", ["p", "l", "ct"])
+        assert state.attributes["brightness"] == 128
+        assert state.attributes["color_temp_kelvin"] == 3000
+        assert gateway.has_pending_write("light-1", ["l", "ct"])
+        assert not gateway.has_pending_write("light-1", ["p"])
         target_props = dict(gateway.commands[-1].to_payload()["set"])
+        assert target_props == {"l": 50, "ct": 3000}
 
         gateway.update_node_params("light-1", {"p": True, "l": 80, "ct": 4000})
         await hass.async_block_till_done()
 
         state = hass.states.get(light_entity_id)
         assert state.state == STATE_ON
-        assert state.attributes["brightness"] == 204
-        assert state.attributes["color_temp_kelvin"] == 4000
-        assert gateway.has_pending_write("light-1", ["p", "l", "ct"])
+        assert state.attributes["brightness"] == 128
+        assert state.attributes["color_temp_kelvin"] == 3000
+        assert gateway.has_pending_write("light-1", ["l", "ct"])
+        assert not gateway.has_pending_write("light-1", ["p"])
 
         gateway.update_node_params("light-1", target_props)
         await hass.async_block_till_done()
@@ -1263,7 +1269,7 @@ async def test_light_service_holds_observed_state_through_intermediate_push(
         assert state.state == STATE_ON
         assert state.attributes["brightness"] == 128
         assert state.attributes["color_temp_kelvin"] == 3000
-        assert not gateway.has_pending_write("light-1", ["p", "l", "ct"])
+        assert not gateway.has_pending_write("light-1", ["l", "ct"])
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -1318,7 +1324,7 @@ async def test_light_write_deadline_keeps_entity_available_and_releases_raw(
         await hass.async_block_till_done()
 
         assert gateway.has_pending_write("light-1", ["p"])
-        assert hass.states.get(light_entity_id).state == STATE_ON
+        assert hass.states.get(light_entity_id).state == STATE_OFF
 
         gateway.expire_pending_writes()
         await hass.async_block_till_done()
@@ -1326,6 +1332,49 @@ async def test_light_write_deadline_keeps_entity_available_and_releases_raw(
         assert gateway.refreshed_node_ids == ["light-1"]
         assert not gateway.has_pending_write("light-1", ["p"])
         assert hass.states.get(light_entity_id).state == STATE_ON
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_light_opposite_service_uses_latest_acknowledged_target(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    gateway = FakeGateway(topology_fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        light_entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_light-1_light")
+        assert hass.states.get(light_entity_id).state == STATE_ON
+
+        await hass.services.async_call(
+            "light",
+            "turn_off",
+            {ATTR_ENTITY_ID: light_entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(light_entity_id).state == STATE_OFF
+
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {ATTR_ENTITY_ID: light_entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(light_entity_id).state == STATE_ON
+        assert gateway.has_pending_write("light-1", ["p"])
+
+        gateway.update_node_params("light-1", {"p": False})
+        await hass.async_block_till_done()
+        assert hass.states.get(light_entity_id).state == STATE_ON
+
+        gateway.update_node_params("light-1", {"p": True})
+        await hass.async_block_till_done()
+        assert hass.states.get(light_entity_id).state == STATE_ON
+        assert not gateway.has_pending_write("light-1", ["p"])
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -1463,7 +1512,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acp": True, "1-acm": 8}
-        assert hass.states.get(climate_entity_id).state == HVACMode.OFF
+        assert hass.states.get(climate_entity_id).state == HVACMode.HEAT
         gateway.update_node_params("air-1", {"1-acp": True, "1-acm": 8})
         await hass.async_block_till_done()
         assert hass.states.get(climate_entity_id).state == HVACMode.HEAT
@@ -1476,7 +1525,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acp": True, "1-acm": 2}
-        assert hass.states.get(climate_entity_id).state == HVACMode.HEAT
+        assert hass.states.get(climate_entity_id).state == HVACMode.DRY
         gateway.update_node_params("air-1", {"1-acp": True, "1-acm": 2})
         await hass.async_block_till_done()
         assert hass.states.get(climate_entity_id).state == HVACMode.DRY
@@ -1489,7 +1538,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acf": 0}
-        assert hass.states.get(climate_entity_id).attributes["fan_mode"] == FAN_MEDIUM
+        assert hass.states.get(climate_entity_id).attributes["fan_mode"] == FAN_AUTO
         gateway.update_node_params("air-1", {"1-acf": 0})
         await hass.async_block_till_done()
         assert hass.states.get(climate_entity_id).attributes["fan_mode"] == FAN_AUTO
@@ -1502,7 +1551,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acf": 1}
-        assert hass.states.get(climate_entity_id).attributes["fan_mode"] == FAN_AUTO
+        assert hass.states.get(climate_entity_id).attributes["fan_mode"] == FAN_HIGH
         gateway.update_node_params("air-1", {"1-acf": 1})
         await hass.async_block_till_done()
         assert hass.states.get(climate_entity_id).attributes["fan_mode"] == FAN_HIGH
@@ -1515,7 +1564,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acrc": False}
-        assert hass.states.get(remote_entity_id).state == STATE_ON
+        assert hass.states.get(remote_entity_id).state == STATE_OFF
         gateway.update_node_params("air-1", {"1-acrc": False})
         await hass.async_block_till_done()
         assert hass.states.get(remote_entity_id).state == STATE_OFF
@@ -1528,7 +1577,7 @@ async def test_air_conditioner_climate_and_config_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"1-acdfltr": 64}
-        assert float(hass.states.get(deflector_entity_id).state) == 32.0
+        assert float(hass.states.get(deflector_entity_id).state) == 64.0
         gateway.update_node_params("air-1", {"1-acdfltr": 64})
         await hass.async_block_till_done()
         assert float(hass.states.get(deflector_entity_id).state) == 64.0
@@ -1627,7 +1676,7 @@ async def test_bath_heater_standard_platform_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"tgt": 40}
-        assert hass.states.get(climate_entity_id).attributes["temperature"] == 38.0
+        assert hass.states.get(climate_entity_id).attributes["temperature"] == 40.0
         gateway.update_node_params("bath-1", {"tgt": 40})
         await hass.async_block_till_done()
         assert hass.states.get(climate_entity_id).attributes["temperature"] == 40.0
@@ -1640,7 +1689,7 @@ async def test_bath_heater_standard_platform_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"ve": 3}
-        assert hass.states.get(fan_entity_id).attributes["percentage"] != 100
+        assert hass.states.get(fan_entity_id).attributes["percentage"] == 100
         gateway.update_node_params("bath-1", {"ve": 3})
         await hass.async_block_till_done()
         assert hass.states.get(fan_entity_id).attributes["percentage"] == 100
@@ -1653,7 +1702,7 @@ async def test_bath_heater_standard_platform_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"he": 1}
-        assert float(hass.states.get(heat_number_entity_id).state) == 3.0
+        assert float(hass.states.get(heat_number_entity_id).state) == 1.0
         gateway.update_node_params("bath-1", {"he": 1})
         await hass.async_block_till_done()
         assert float(hass.states.get(heat_number_entity_id).state) == 1.0
@@ -1666,7 +1715,7 @@ async def test_bath_heater_standard_platform_entities(
         )
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["set"] == {"bhm": 4}
-        assert hass.states.get(mode_entity_id).state == "mode_2"
+        assert hass.states.get(mode_entity_id).state == "mode_4"
         gateway.update_node_params("bath-1", {"bhm": 4})
         await hass.async_block_till_done()
         assert hass.states.get(mode_entity_id).state == "mode_4"
@@ -1675,7 +1724,7 @@ async def test_bath_heater_standard_platform_entities(
         await hass.async_block_till_done()
 
 
-async def test_bath_heater_config_entities_hold_observed_state_until_push(
+async def test_bath_heater_config_entities_project_acknowledged_target_until_push(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -1694,7 +1743,7 @@ async def test_bath_heater_config_entities_hold_observed_state_until_push(
             blocking=True,
         )
         await hass.async_block_till_done()
-        assert hass.states.get(fan_entity_id).attributes["percentage"] != 100
+        assert hass.states.get(fan_entity_id).attributes["percentage"] == 100
         assert gateway.has_pending_write("bath-1", ["ve"])
         gateway.update_node_params("bath-1", {"ve": 3})
         await hass.async_block_till_done()
@@ -1707,7 +1756,7 @@ async def test_bath_heater_config_entities_hold_observed_state_until_push(
             blocking=True,
         )
         await hass.async_block_till_done()
-        assert float(hass.states.get(heat_number_entity_id).state) == 3.0
+        assert float(hass.states.get(heat_number_entity_id).state) == 1.0
         assert gateway.has_pending_write("bath-1", ["he"])
         gateway.update_node_params("bath-1", {"he": 1})
         await hass.async_block_till_done()
@@ -1720,7 +1769,7 @@ async def test_bath_heater_config_entities_hold_observed_state_until_push(
             blocking=True,
         )
         await hass.async_block_till_done()
-        assert hass.states.get(mode_entity_id).state == "mode_2"
+        assert hass.states.get(mode_entity_id).state == "mode_4"
         assert gateway.has_pending_write("bath-1", ["bhm"])
         gateway.update_node_params("bath-1", {"bhm": 4})
         await hass.async_block_till_done()

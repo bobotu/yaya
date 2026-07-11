@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -8,19 +9,23 @@ import pytest
 pytest.importorskip("homeassistant")
 pytest.importorskip("pytest_homeassistant_custom_component")
 
-from homeassistant.components.light import ATTR_TRANSITION
+from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_COLOR_TEMP_KELVIN, ATTR_RGB_COLOR, ATTR_TRANSITION
 
 from custom_components.yeelight_pro.const import DEFAULT_LIGHT_TRANSITION
 from custom_components.yeelight_pro.gateway import DeviceType, NodeType, TopologyNode
 from custom_components.yeelight_pro.light import YeelightProLight
 
 
-def _light(default_transition: float = DEFAULT_LIGHT_TRANSITION) -> tuple[YeelightProLight, TopologyNode]:
+def _light(
+    default_transition: float = DEFAULT_LIGHT_TRANSITION,
+    *,
+    is_on: bool = False,
+) -> tuple[YeelightProLight, TopologyNode]:
     node = TopologyNode(
         id="light-1",
         nt=NodeType.MESH_SUBDEVICE,
         type=DeviceType.LIGHT_BRIGHTNESS,
-        params={"p": False},
+        params={"p": is_on},
     )
     coordinator = SimpleNamespace(
         default_light_transition=default_transition,
@@ -68,4 +73,35 @@ async def test_explicit_transition_overrides_default_including_zero() -> None:
         node,
         {"p": True},
         duration=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("is_on", "kwargs", "expected_props"),
+    [
+        (True, {ATTR_BRIGHTNESS: 128}, {"l": 50}),
+        (True, {ATTR_COLOR_TEMP_KELVIN: 3000}, {"ct": 3000}),
+        (True, {ATTR_BRIGHTNESS: 128, ATTR_COLOR_TEMP_KELVIN: 3000}, {"l": 50, "ct": 3000}),
+        (False, {ATTR_BRIGHTNESS: 128}, {"l": 50}),
+        (False, {ATTR_COLOR_TEMP_KELVIN: 3000}, {"ct": 3000}),
+        (True, {ATTR_RGB_COLOR: (1, 2, 3)}, {"p": True, "c": 0x010203}),
+        (False, {ATTR_RGB_COLOR: (1, 2, 3)}, {"p": True, "c": 0x010203}),
+        (False, {}, {"p": True}),
+    ],
+)
+async def test_light_uses_implicit_power_for_brightness_and_temperature(
+    is_on: bool,
+    kwargs: dict[str, Any],
+    expected_props: dict[str, Any],
+) -> None:
+    light, node = _light(is_on=is_on)
+
+    with patch("custom_components.yeelight_pro.light.async_set_node_props", new=AsyncMock()) as set_props:
+        await light.async_turn_on(**kwargs)
+
+    set_props.assert_awaited_once_with(
+        light.coordinator,
+        node,
+        expected_props,
+        duration=500,
     )

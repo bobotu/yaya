@@ -15,8 +15,10 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_DEFAULT_LIGHT_TRANSITION,
     CONF_IMPORT_ROOM_IDS,
+    CONF_LIGHT_BATCH_DELAY_STEP_MS,
     CONF_SWITCH_MODES,
     CONF_WIRELESS_SWITCH_NODE_IDS,
+    DEFAULT_LIGHT_BATCH_DELAY_STEP_MS,
     DEFAULT_LIGHT_TRANSITION,
     DEFAULT_PORT,
     DEFAULT_REQUEST_TIMEOUT,
@@ -98,6 +100,7 @@ class YeelightProConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 wireless_switch_node_ids=[],
                 switch_options=self._gateway_options.switch_options,
                 default_light_transition=DEFAULT_LIGHT_TRANSITION,
+                light_batch_delay_step_ms=DEFAULT_LIGHT_BATCH_DELAY_STEP_MS,
             ),
         )
 
@@ -141,6 +144,9 @@ class YeelightProOptionsFlow(config_entries.OptionsFlow):
                 default_light_transition=self.config_entry.options.get(
                     CONF_DEFAULT_LIGHT_TRANSITION, DEFAULT_LIGHT_TRANSITION
                 ),
+                light_batch_delay_step_ms=self.config_entry.options.get(
+                    CONF_LIGHT_BATCH_DELAY_STEP_MS, DEFAULT_LIGHT_BATCH_DELAY_STEP_MS
+                ),
             ),
             errors=errors,
         )
@@ -173,6 +179,7 @@ def _import_filter_schema(
     wireless_switch_node_ids: list[str],
     switch_options: list[selector.SelectOptionDict],
     default_light_transition: float,
+    light_batch_delay_step_ms: int,
 ) -> vol.Schema:
     return vol.Schema(
         {
@@ -201,6 +208,15 @@ def _import_filter_schema(
                     unit_of_measurement=UnitOfTime.SECONDS,
                 )
             ),
+            vol.Optional(CONF_LIGHT_BATCH_DELAY_STEP_MS, default=light_batch_delay_step_ms): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=250,
+                    step=5,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement=UnitOfTime.MILLISECONDS,
+                )
+            ),
         }
     )
 
@@ -213,6 +229,9 @@ def _options_data(
     wireless_switch_node_ids = {str(node_id) for node_id in user_input.get(CONF_WIRELESS_SWITCH_NODE_IDS, [])}
     return {
         CONF_DEFAULT_LIGHT_TRANSITION: user_input.get(CONF_DEFAULT_LIGHT_TRANSITION, DEFAULT_LIGHT_TRANSITION),
+        CONF_LIGHT_BATCH_DELAY_STEP_MS: user_input.get(
+            CONF_LIGHT_BATCH_DELAY_STEP_MS, DEFAULT_LIGHT_BATCH_DELAY_STEP_MS
+        ),
         CONF_IMPORT_ROOM_IDS: [str(room_id) for room_id in user_input.get(CONF_IMPORT_ROOM_IDS, [])],
         CONF_SWITCH_MODES: {
             str(option["value"]): SWITCH_MODE_WIRELESS

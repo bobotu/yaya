@@ -212,7 +212,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await actor.close()
 
-    async def test_write_ack_holds_visible_state_until_target_push(self) -> None:
+    async def test_write_ack_projects_target_and_suppresses_stale_push(self) -> None:
         connection = FakeConnectionRef()
         session = self.session(connection, set_prop_batch_delay=0)
         session.store.apply_topology(_topology(("light-a", 2, {"p": True})))
@@ -222,14 +222,16 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         response = await session.submit_commands(
             [NodeCommand(id="light-a", nt=2, props={"p": False})],
         )
+        await asyncio.sleep(0)
 
         self.assertEqual(response, {"result": "ok"})
         self.assertTrue(session.has_pending_write("light-a", ["p"]))
-        self.assertTrue(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+        self.assertFalse(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+        self.assertEqual(len(events), 1)
 
         await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=True)))
         await asyncio.sleep(0)
-        self.assertEqual(events, [])
+        self.assertEqual(len(events), 1)
 
         await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=False)))
         await asyncio.sleep(0)
@@ -238,7 +240,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
         self.assertEqual(len(events), 1)
 
-    async def test_gateway_batch_releases_members_in_one_state_event(self) -> None:
+    async def test_gateway_batch_projects_members_in_one_state_event(self) -> None:
         connection = FakeConnectionRef()
         session = self.session(connection, set_prop_batch_delay=0)
         session.store.apply_topology(
@@ -256,17 +258,76 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 NodeCommand(id="light-b", nt=2, props={"l": 80}),
             ],
         )
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual({change.id for change in events[0].changes}, {"light-a", "light-b"})
+        self.assertEqual(session.visible_node("light-a").params["l"], 80)  # type: ignore[union-attr]
+        self.assertEqual(session.visible_node("light-b").params["l"], 80)  # type: ignore[union-attr]
+
         await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=True, l=80)))
         await asyncio.sleep(0)
 
-        self.assertEqual(events, [])
-        self.assertEqual(session.visible_node("light-a").params["l"], 20)  # type: ignore[union-attr]
+        self.assertEqual(len(events), 1)
 
         await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-b", p=True, l=80)))
         await asyncio.sleep(0)
 
         self.assertEqual(len(events), 1)
-        self.assertEqual({change.id for change in events[0].changes}, {"light-a", "light-b"})
+        self.assertFalse(session.has_pending_write("light-a"))
+        self.assertFalse(session.has_pending_write("light-b"))
+
+    async def test_repeated_accepted_target_does_not_reset_reconciliation(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(
+            connection,
+            set_prop_batch_delay=0,
+            state_readback_delay=60,
+            state_deadline=60,
+        )
+        session.store.apply_topology(_topology(("light-a", 2, {"p": False})))
+
+        await session.submit_commands([NodeCommand(id="light-a", nt=2, props={"p": True})])
+        first_deadline = session.store.next_deadline()
+        await session.submit_commands([NodeCommand(id="light-a", nt=2, props={"p": True})])
+
+        self.assertEqual(session.store.next_deadline(), first_deadline)
+        self.assertEqual(session.write_diagnostics()["active_batches"], 1)
+        self.assertEqual(session.write_diagnostics()["outcomes"]["sent"], 2)
+        self.assertEqual(
+            len([request for request in connection.requests if request.method == "gateway_set.prop"]),
+            2,
+        )
+        self.assertTrue(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+
+        await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=True)))
+
+        self.assertFalse(session.has_pending_write("light-a"))
+
+    async def test_new_opposite_ack_replaces_visible_target_before_any_push(self) -> None:
+        connection = FakeConnectionRef()
+        session = self.session(connection, set_prop_batch_delay=0)
+        session.store.apply_topology(_topology(("light-a", 2, {"p": False})))
+        events: list[Any] = []
+        session.add_state_listener(events.append)
+
+        await session.submit_commands([NodeCommand(id="light-a", nt=2, props={"p": True})])
+        await asyncio.sleep(0)
+        self.assertTrue(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+
+        await session.submit_commands([NodeCommand(id="light-a", nt=2, props={"p": False})])
+        await asyncio.sleep(0)
+        self.assertFalse(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+        self.assertEqual(len(events), 2)
+
+        await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=True)))
+        await asyncio.sleep(0)
+        self.assertFalse(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+        self.assertEqual(len(events), 2)
+
+        await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=False)))
+
+        self.assertFalse(session.has_pending_write("light-a"))
 
     async def test_delayed_readback_uses_group_api_and_confirms_batch(self) -> None:
         connection = FakeConnectionRef()
@@ -366,7 +427,7 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await sync_task
 
         self.assertTrue(session.has_pending_write("light-a", ["p"]))
-        self.assertTrue(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
+        self.assertFalse(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
 
         await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=False)))
 
@@ -396,11 +457,13 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 NodeCommand(id="light-b", nt=2, props={"p": False}),
             ]
         )
+        await asyncio.sleep(0)
         await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=False)))
         await asyncio.sleep(0.06)
 
-        self.assertEqual(len(events), 1)
-        self.assertEqual({change.id for change in events[0].changes}, {"light-a"})
+        self.assertEqual(len(events), 2)
+        self.assertEqual({change.id for change in events[0].changes}, {"light-a", "light-b"})
+        self.assertEqual({change.id for change in events[1].changes}, {"light-b"})
         self.assertFalse(session.visible_node("light-a").params["p"])  # type: ignore[union-attr]
         self.assertTrue(session.visible_node("light-b").params["p"])  # type: ignore[union-attr]
         self.assertFalse(session.has_pending_write("light-a"))
@@ -415,8 +478,9 @@ class SessionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await session.submit_commands([NodeCommand(id="light-a", nt=2, props={"l": 80})])
 
         self.assertTrue(session.has_pending_write("light-a", ["p", "l"]))
+        self.assertEqual(session.visible_node("light-a").params, {"p": True, "l": 80})  # type: ignore[union-attr]
         await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", l=80)))
-        self.assertEqual(session.visible_node("light-a").params, {"p": False, "l": 20})  # type: ignore[union-attr]
+        self.assertEqual(session.visible_node("light-a").params, {"p": True, "l": 80})  # type: ignore[union-attr]
 
         await session.ref.ask(RpcPushEvent(epoch=0, message=_push("light-a", p=True)))
 
