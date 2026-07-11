@@ -422,7 +422,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response["result"], "ok")
 
-    async def test_set_node_props_holds_observed_state_until_target_push(self) -> None:
+    async def test_set_node_props_projects_ack_target_and_suppresses_stale_push(self) -> None:
         allow_target = asyncio.Event()
 
         async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -461,7 +461,7 @@ class RpcClientTests(unittest.IsolatedAsyncioTestCase):
             await gateway.set_node_props("light-1", {"p": False})
             await asyncio.sleep(0.02)
 
-            self.assertTrue(gateway.visible_node("light-1").params["p"])
+            self.assertFalse(gateway.visible_node("light-1").params["p"])
             self.assertTrue(gateway.has_pending_write("light-1", ["p"]))
 
             allow_target.set()

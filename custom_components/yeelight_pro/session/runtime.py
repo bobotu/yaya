@@ -679,8 +679,9 @@ class GatewaySession(Actor[Any]):
                 state_targets,
                 deadline=now + self._state_deadline,
             )
-            self._batch_started_at[batch_id] = now
             self._write_outcomes["sent"] += 1
+            if batch_id is not None:
+                self._batch_started_at[batch_id] = now
             self._after_store_result(result, ended_as="superseded")
             await self._publish_if_changed(
                 before,

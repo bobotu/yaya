@@ -13,7 +13,7 @@ PropertyKey: TypeAlias = tuple[str, str]
 
 @dataclass
 class PendingBatch:
-    """Observed-state hold for one accepted gateway write batch."""
+    """Property targets owned by one gateway write batch."""
 
     id: int
     deadline: float
@@ -37,7 +37,7 @@ class StateResult:
 
 
 class StateStore:
-    """Own raw gateway observations, HA-visible nodes, and pending write holds."""
+    """Own raw observations and the bounded HA-visible write projection."""
 
     def __init__(self) -> None:
         self.raw = GatewaySnapshot()
@@ -73,18 +73,23 @@ class StateStore:
         targets_by_node: Mapping[NodeId, Mapping[str, Any]],
         *,
         deadline: float,
-    ) -> tuple[int, StateResult]:
-        """Hold target properties before their gateway RPC is sent."""
+    ) -> tuple[int | None, StateResult]:
+        """Hold visible properties before their gateway RPC is sent."""
 
         targets: dict[PropertyKey, Any] = {}
         node_ids: dict[str, NodeId] = {}
         for node_id, props in targets_by_node.items():
             node_key = _node_key(node_id)
-            node_ids[node_key] = node_id
             for prop, value in props.items():
-                targets[(node_key, prop)] = value
-        if not targets:
+                key = (node_key, prop)
+                if self._owns_accepted_target(key, value):
+                    continue
+                targets[key] = value
+                node_ids[node_key] = node_id
+        if not any(props for props in targets_by_node.values()):
             raise ValueError("a pending batch requires at least one target property")
+        if not targets:
+            return None, StateResult()
 
         batch_id = self._next_batch_id
         self._next_batch_id += 1
@@ -117,13 +122,17 @@ class StateStore:
         return batch_id, result
 
     def accept_batch(self, batch_id: int) -> StateResult:
-        """Record aggregate gateway acceptance without confirming device state."""
+        """Project an accepted batch target without confirming device state."""
 
         batch = self._batches.get(batch_id)
         if batch is None:
             return StateResult()
         batch.accepted = True
-        return self._release_ready_batches({batch_id})
+        changed = self._reproject_nodes(batch.node_ids.values())
+        return _merge_results(
+            StateResult(changed_node_ids=frozenset(changed)),
+            self._release_ready_batches({batch_id}),
+        )
 
     def fail_batch(self, batch_id: int) -> StateResult:
         """Remove a failed pre-send hold and expose the latest observed raw state."""
@@ -342,13 +351,23 @@ class StateStore:
     def _project_node(self, raw_node: TopologyNode, visible: TopologyNode | None) -> TopologyNode:
         params = dict(raw_node.params)
         node_key = _node_key(raw_node.id)
-        held_props = (prop for (owner_node, prop), _batch_id in self._owner.items() if owner_node == node_key)
-        for prop in held_props:
+        held = ((prop, batch_id) for (owner_node, prop), batch_id in self._owner.items() if owner_node == node_key)
+        for prop, batch_id in held:
+            key = (node_key, prop)
+            batch = self._batches.get(batch_id)
+            if batch is not None and batch.accepted and key in batch.targets:
+                params[prop] = batch.targets[key]
+                continue
             if visible is not None and prop in visible.params:
                 params[prop] = visible.params[prop]
             else:
                 params.pop(prop, None)
         return replace(raw_node, params=params)
+
+    def _owns_accepted_target(self, key: PropertyKey, value: Any) -> bool:
+        batch_id = self._owner.get(key)
+        batch = None if batch_id is None else self._batches.get(batch_id)
+        return batch is not None and batch.accepted and key in batch.targets and batch.targets[key] == value
 
     def _metadata_signature(self) -> tuple[Any, ...]:
         return (
