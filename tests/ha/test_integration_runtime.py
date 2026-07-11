@@ -1015,7 +1015,7 @@ async def test_light_service_maps_transition_and_flash(
             blocking=True,
         )
         await hass.async_block_till_done()
-        assert gateway.commands[-1].to_payload()["set"] == {"p": True, "l": 50, "ct": 3000}
+        assert gateway.commands[-1].to_payload()["set"] == {"l": 50, "ct": 3000}
         assert gateway.commands[-1].to_payload()["duration"] == 1500
         state = hass.states.get(light_entity_id)
         assert state.state == STATE_ON
@@ -1247,8 +1247,10 @@ async def test_light_service_projects_acknowledged_target_through_intermediate_p
         assert state.state == STATE_ON
         assert state.attributes["brightness"] == 128
         assert state.attributes["color_temp_kelvin"] == 3000
-        assert gateway.has_pending_write("light-1", ["p", "l", "ct"])
+        assert gateway.has_pending_write("light-1", ["l", "ct"])
+        assert not gateway.has_pending_write("light-1", ["p"])
         target_props = dict(gateway.commands[-1].to_payload()["set"])
+        assert target_props == {"l": 50, "ct": 3000}
 
         gateway.update_node_params("light-1", {"p": True, "l": 80, "ct": 4000})
         await hass.async_block_till_done()
@@ -1257,7 +1259,8 @@ async def test_light_service_projects_acknowledged_target_through_intermediate_p
         assert state.state == STATE_ON
         assert state.attributes["brightness"] == 128
         assert state.attributes["color_temp_kelvin"] == 3000
-        assert gateway.has_pending_write("light-1", ["p", "l", "ct"])
+        assert gateway.has_pending_write("light-1", ["l", "ct"])
+        assert not gateway.has_pending_write("light-1", ["p"])
 
         gateway.update_node_params("light-1", target_props)
         await hass.async_block_till_done()
@@ -1266,7 +1269,7 @@ async def test_light_service_projects_acknowledged_target_through_intermediate_p
         assert state.state == STATE_ON
         assert state.attributes["brightness"] == 128
         assert state.attributes["color_temp_kelvin"] == 3000
-        assert not gateway.has_pending_write("light-1", ["p", "l", "ct"])
+        assert not gateway.has_pending_write("light-1", ["l", "ct"])
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()

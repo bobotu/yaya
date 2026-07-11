@@ -12,6 +12,7 @@ from typing import Any
 from ..gateway.coercion import int_or_none as _int_or_none
 from ..gateway.coercion import node_key as _node_key
 from ..gateway.commands import MotorAction, NodeCommand, NodeSet
+from ..gateway.const import DEFAULT_LIGHT_BATCH_DELAY_STEP_MS
 from ..gateway.events import iter_gateway_events
 from ..gateway.exceptions import ProtocolError, YeelightProError
 from ..gateway.protocol import GatewayMethod, list_payload
@@ -54,6 +55,7 @@ GatewayEventListener = Callable[[GatewayEventReceived], Awaitable[None] | None]
 _LOGGER = logging.getLogger(__name__)
 _MAX_LOG_ITEMS = 20
 _LIGHT_IMPLICIT_ON_PROPERTIES = frozenset({"l", "ct", "c", "angle"})
+_LIGHT_SET_PROPERTIES = _LIGHT_IMPLICIT_ON_PROPERTIES | {"p"}
 _MOTOR_TARGET_PROPERTIES = frozenset({MOTOR_TARGET_POSITION_PROP, MOTOR_TARGET_ANGLE_PROP})
 
 DEFAULT_STATE_READBACK_DELAY = 6.0
@@ -144,6 +146,7 @@ class GatewaySession(Actor[Any]):
         *,
         connection_ref: ActorRef[ConnectionActorMessage],
         set_prop_batch_delay: float = 0.01,
+        light_batch_delay_step_ms: int = DEFAULT_LIGHT_BATCH_DELAY_STEP_MS,
         state_readback_delay: float = DEFAULT_STATE_READBACK_DELAY,
         state_deadline: float = DEFAULT_STATE_DEADLINE,
         motor_tracking_ttl: float = MOTOR_TRACKING_TTL,
@@ -159,6 +162,7 @@ class GatewaySession(Actor[Any]):
         self.full_prop_timeout = 5.0
 
         self._batch_delay = max(0.0, set_prop_batch_delay)
+        self._light_batch_delay_step_ms = max(0, int(light_batch_delay_step_ms))
         self._state_readback_delay = max(0.0, state_readback_delay)
         self._state_deadline = max(self._state_readback_delay, state_deadline)
         self._pending_writes: list[_WriteRequest] = []
@@ -669,6 +673,7 @@ class GatewaySession(Actor[Any]):
         self._pending_writes.clear()
         commands = tuple(command for request in requests for command in request.commands)
         payload = _batched_payload_from_commands(commands)
+        _apply_light_batch_delay_compensation(payload, step_ms=self._light_batch_delay_step_ms)
         state_targets = _state_targets(commands)
         batch_id: int | None = None
 
@@ -1117,6 +1122,30 @@ def _batched_payload_from_commands(commands: Iterable[NodeCommand | NodeSet]) ->
             payloads.append(merged_payload)
         merged_payload["set"].update(dict(props))
     return payloads
+
+
+def _apply_light_batch_delay_compensation(payloads: list[dict[str, Any]], *, step_ms: int) -> None:
+    if step_ms <= 0:
+        return
+    light_payloads = [payload for payload in payloads if _is_timed_light_set_payload(payload)]
+    if len(light_payloads) < 2:
+        return
+    if any("delay" in payload or "delayOff" in payload for payload in light_payloads):
+        return
+
+    last_index = len(light_payloads) - 1
+    for index, payload in enumerate(light_payloads):
+        payload["delay"] = (last_index - index) * step_ms
+
+
+def _is_timed_light_set_payload(payload: Mapping[str, Any]) -> bool:
+    props = payload.get("set")
+    return (
+        payload.get("duration") is not None
+        and isinstance(props, Mapping)
+        and bool(props)
+        and set(props).issubset(_LIGHT_SET_PROPERTIES)
+    )
 
 
 def _is_mergeable_set_payload(payload: Mapping[str, Any]) -> bool:

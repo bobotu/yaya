@@ -123,7 +123,10 @@ class YeelightProLight(YeelightProEntity, LightEntity):
         if flash is not None:
             await async_call_gateway(device.blink(blink_type=_flash_to_blink_type(flash)))
             return
-        props: dict[str, Any] = {"p": True}
+        has_implicit_on_target = brightness_percent is not None or color_temperature is not None
+        props: dict[str, Any] = {}
+        if not has_implicit_on_target:
+            props["p"] = True
         if brightness_percent is not None:
             props["l"] = brightness_percent
         if color_temperature is not None:

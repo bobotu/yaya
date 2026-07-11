@@ -14,11 +14,13 @@
         "description": "Choose which gateway rooms to import. Leave rooms empty to import all devices.",
         "data": {
           "default_light_transition": "Default light transition",
+          "light_batch_delay_step_ms": "Multi-light synchronization interval",
           "import_room_ids": "Import rooms",
           "wireless_switch_node_ids": "Wireless switch mode devices"
         },
         "data_description": {
           "default_light_transition": "Used for light on and off commands that do not specify a transition.",
+          "light_batch_delay_step_ms": "Compensates for sequential gateway dispatch when controlling multiple lights. Set to 0 to disable.",
           "import_room_ids": "Leave empty to import all rooms.",
           "wireless_switch_node_ids": "Selected relay switches are exposed as programmable scene switches. Unselected switches are exposed as controllable relay switches."
         }
@@ -38,11 +40,13 @@
         "description": "Choose which gateway rooms to import. Leave rooms empty to import all devices.",
         "data": {
           "default_light_transition": "Default light transition",
+          "light_batch_delay_step_ms": "Multi-light synchronization interval",
           "import_room_ids": "Import rooms",
           "wireless_switch_node_ids": "Wireless switch mode devices"
         },
         "data_description": {
           "default_light_transition": "Used for light on and off commands that do not specify a transition.",
+          "light_batch_delay_step_ms": "Compensates for sequential gateway dispatch when controlling multiple lights. Set to 0 to disable.",
           "import_room_ids": "Leave empty to import all rooms.",
           "wireless_switch_node_ids": "Selected relay switches are exposed as programmable scene switches. Unselected switches are exposed as controllable relay switches."
         }
