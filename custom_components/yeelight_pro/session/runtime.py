@@ -674,6 +674,7 @@ class GatewaySession(Actor[Any]):
         commands = tuple(command for request in requests for command in request.commands)
         payload = _batched_payload_from_commands(commands)
         _apply_light_batch_delay_compensation(payload, step_ms=self._light_batch_delay_step_ms)
+        settle_delay = _batch_settle_delay(payload)
         state_targets = _state_targets(commands)
         batch_id: int | None = None
 
@@ -682,7 +683,7 @@ class GatewaySession(Actor[Any]):
             now = asyncio.get_running_loop().time()
             batch_id, result = self.store.prepare_batch(
                 state_targets,
-                deadline=now + self._state_deadline,
+                deadline=now + settle_delay + self._state_deadline,
             )
             self._write_outcomes["sent"] += 1
             if batch_id is not None:
@@ -721,7 +722,15 @@ class GatewaySession(Actor[Any]):
             return
 
         before = self._visible_snapshot()
-        result = self.store.accept_batch(batch_id) if batch_id is not None else StateResult()
+        accepted_at = asyncio.get_running_loop().time()
+        result = (
+            self.store.accept_batch(
+                batch_id,
+                deadline=accepted_at + settle_delay + self._state_deadline,
+            )
+            if batch_id is not None
+            else StateResult()
+        )
         motor_affected = self._record_motor_commands(payload)
         self._after_store_result(result, ended_as="observed")
         await self._publish_if_changed(
@@ -733,7 +742,7 @@ class GatewaySession(Actor[Any]):
         )
         if batch_id is not None and self.store.pending_node_ids(batch_id, unresolved_only=False):
             self._readback_tasks[batch_id] = self.defer_later(
-                self._state_readback_delay,
+                settle_delay + self._state_readback_delay,
                 _ReadbackBatch(batch_id),
                 name=f"yeelight-pro-state-readback-{batch_id}",
             )
@@ -1136,6 +1145,23 @@ def _apply_light_batch_delay_compensation(payloads: list[dict[str, Any]], *, ste
     last_index = len(light_payloads) - 1
     for index, payload in enumerate(light_payloads):
         payload["delay"] = (last_index - index) * step_ms
+
+
+def _batch_settle_delay(payloads: Iterable[Mapping[str, Any]]) -> float:
+    """Return the longest requested command delay plus transition, in seconds."""
+
+    settle_ms = 0.0
+    for payload in payloads:
+        duration = _non_negative_number(payload.get("duration"))
+        delay = _non_negative_number(payload.get("delay"))
+        settle_ms = max(settle_ms, duration + delay)
+    return settle_ms / 1000
+
+
+def _non_negative_number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return max(0.0, float(value))
 
 
 def _is_timed_light_set_payload(payload: Mapping[str, Any]) -> bool:

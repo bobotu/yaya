@@ -121,13 +121,15 @@ class StateStore:
             result = _merge_results(result, StateResult(ended_batch_ids=tuple(sorted(ended))))
         return batch_id, result
 
-    def accept_batch(self, batch_id: int) -> StateResult:
+    def accept_batch(self, batch_id: int, *, deadline: float | None = None) -> StateResult:
         """Project an accepted batch target without confirming device state."""
 
         batch = self._batches.get(batch_id)
         if batch is None:
             return StateResult()
         batch.accepted = True
+        if deadline is not None:
+            batch.deadline = deadline
         changed = self._reproject_nodes(batch.node_ids.values())
         return _merge_results(
             StateResult(changed_node_ids=frozenset(changed)),
