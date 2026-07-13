@@ -117,6 +117,9 @@
       },
       "heat_level": {
         "name": "制热档位"
+      },
+      "slat_position": {
+        "name": "叶片位置"
       }
     },
     "select": {
@@ -147,6 +150,9 @@
       },
       "remote_controller": {
         "name": "遥控器"
+      },
+      "reverse_slat_direction": {
+        "name": "反转叶片方向"
       },
       "relay": {
         "name": "继电器 {channel}"

@@ -18,6 +18,7 @@ from custom_components.yeelight_pro.const import (
     CONF_DEFAULT_LIGHT_TRANSITION,
     CONF_IMPORT_ROOM_IDS,
     CONF_LIGHT_BATCH_DELAY_STEP_MS,
+    CONF_REVERSED_DREAM_CURTAIN_NODE_IDS,
     CONF_SWITCH_MODES,
     CONF_WIRELESS_SWITCH_NODE_IDS,
     DEFAULT_LIGHT_BATCH_DELAY_STEP_MS,
@@ -160,6 +161,7 @@ async def test_options_flow_updates_switch_modes(hass: HomeAssistant) -> None:
                 "switch-1": SWITCH_MODE_WIRELESS,
                 "double-switch-1": SWITCH_MODE_RELAY,
             },
+            CONF_REVERSED_DREAM_CURTAIN_NODE_IDS: ["curtain-1"],
         },
     )
     entry.add_to_hass(hass)
@@ -210,6 +212,7 @@ async def test_options_flow_updates_switch_modes(hass: HomeAssistant) -> None:
             "switch-1": SWITCH_MODE_RELAY,
             "double-switch-1": SWITCH_MODE_WIRELESS,
         },
+        CONF_REVERSED_DREAM_CURTAIN_NODE_IDS: ["curtain-1"],
     }
 
 

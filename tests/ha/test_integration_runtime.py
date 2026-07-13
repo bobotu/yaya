@@ -16,7 +16,7 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 
 from homeassistant.components.button import ButtonDeviceClass
 from homeassistant.components.climate.const import ATTR_FAN_MODE, FAN_AUTO, FAN_HIGH, FAN_LOW, FAN_MEDIUM, HVACMode
-from homeassistant.components.cover import ATTR_POSITION, ATTR_TILT_POSITION, CoverState
+from homeassistant.components.cover import ATTR_POSITION, CoverEntityFeature
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -24,7 +24,15 @@ from homeassistant.components.light import (
     ATTR_TRANSITION,
     FLASH_SHORT,
 )
-from homeassistant.const import ATTR_ENTITY_ID, CONF_HOST, CONF_PORT, STATE_OFF, STATE_ON, STATE_UNAVAILABLE
+from homeassistant.const import (
+    ATTR_ENTITY_ID,
+    CONF_HOST,
+    CONF_PORT,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -33,6 +41,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.yeelight_pro.const import (
     CONF_IMPORT_ROOM_IDS,
+    CONF_REVERSED_DREAM_CURTAIN_NODE_IDS,
     CONF_SWITCH_MODES,
     DOMAIN,
     EVENT_YEELIGHT_PRO,
@@ -48,10 +57,6 @@ from custom_components.yeelight_pro.session import (
     StateChangeReason,
     StateStore,
     VisibleStateChanged,
-)
-from custom_components.yeelight_pro.session.motor import (
-    MOTOR_TRACKING_ANGLE_MOTION,
-    MOTOR_TRACKING_TARGET_ANGLE,
 )
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
@@ -1874,7 +1879,162 @@ async def test_unknown_property_nodes_are_diagnostics_only(
         await hass.async_block_till_done()
 
 
-async def test_cover_services_send_standard_commands(
+async def test_dream_curtain_discovers_fabric_cover_and_slat_number_only(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    fixture = deepcopy(topology_fixture)
+    dream_curtain = next(node for node in fixture["nodes"] if node["id"] == "curtain-1")
+    dream_curtain.update({"type": 6, "pt": 22})
+    fixture["nodes"].append(
+        {
+            "id": "ordinary-curtain",
+            "nt": 2,
+            "type": 6,
+            "pt": 6,
+            "name": "Ordinary curtain",
+            "roomId": "room-2",
+            "params": {"cp": 40, "tp": 40, "rs": 1},
+        }
+    )
+    gateway = FakeGateway(fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        registry = er.async_get(hass)
+        dream_cover_id = _entity_id_for_unique_id(hass, entry.entry_id, "_curtain-1_cover")
+        slat_number_id = _entity_id_for_unique_id(hass, entry.entry_id, "_curtain-1_slat_position")
+        reverse_switch_id = _entity_id_for_unique_id(hass, entry.entry_id, "_curtain-1_reverse_slat_direction")
+        ordinary_cover_id = _entity_id_for_unique_id(hass, entry.entry_id, "_ordinary-curtain_cover")
+        entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+        fabric_features = int(
+            CoverEntityFeature.OPEN
+            | CoverEntityFeature.CLOSE
+            | CoverEntityFeature.STOP
+            | CoverEntityFeature.SET_POSITION
+        )
+
+        dream_cover = hass.states.get(dream_cover_id)
+        assert dream_cover is not None
+        assert dream_cover.attributes["supported_features"] == fabric_features
+        assert "current_tilt_position" not in dream_cover.attributes
+
+        slat_number = hass.states.get(slat_number_id)
+        assert slat_number is not None
+        assert float(slat_number.state) == 25.0
+        assert slat_number.attributes["min"] == 0
+        assert slat_number.attributes["max"] == 100
+        assert registry.async_get(slat_number_id).entity_category is None
+
+        reverse_switch = hass.states.get(reverse_switch_id)
+        assert reverse_switch is not None
+        assert reverse_switch.state == STATE_OFF
+        assert registry.async_get(reverse_switch_id).entity_category is EntityCategory.CONFIG
+
+        ordinary_cover = hass.states.get(ordinary_cover_id)
+        assert ordinary_cover is not None
+        assert ordinary_cover.attributes["current_position"] == 40
+        assert ordinary_cover.attributes["supported_features"] == fabric_features
+        assert "current_tilt_position" not in ordinary_cover.attributes
+        assert not any(entry.unique_id.endswith("_ordinary-curtain_slat_position") for entry in entries)
+        assert not any(entry.unique_id.endswith("_ordinary-curtain_reverse_slat_direction") for entry in entries)
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_dream_curtain_slat_number_projects_writes_and_availability(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+) -> None:
+    fixture = deepcopy(topology_fixture)
+    dream_curtain = next(node for node in fixture["nodes"] if node["id"] == "curtain-1")
+    dream_curtain.update({"type": 6, "pt": 22})
+    gateway = FakeGateway(fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        slat_number_id = _entity_id_for_unique_id(hass, entry.entry_id, "_curtain-1_slat_position")
+
+        for angle, position in ((0, 0), (90, 50), (119, 66), (180, 100)):
+            gateway.update_node_params("curtain-1", {"cra": angle, "trs": 1})
+            await hass.async_block_till_done()
+            assert float(hass.states.get(slat_number_id).state) == position
+
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {ATTR_ENTITY_ID: slat_number_id, "value": 66},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert gateway.commands[-1].to_payload()["set"] == {"tra": 119}
+        assert not gateway.has_pending_write("curtain-1")
+
+        gateway.update_node_params("curtain-1", {"trs": 0})
+        await hass.async_block_till_done()
+        assert hass.states.get(slat_number_id).state == STATE_UNKNOWN
+
+        unavailable_fixture = deepcopy(fixture)
+        unavailable_curtain = next(node for node in unavailable_fixture["nodes"] if node["id"] == "curtain-1")
+        unavailable_curtain["o"] = False
+        gateway.replace_topology(unavailable_fixture)
+        await hass.async_block_till_done()
+        assert hass.states.get(slat_number_id).state == STATE_UNAVAILABLE
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_dream_curtain_slat_direction_configuration_is_persistent(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = deepcopy(topology_fixture)
+    dream_curtain = next(node for node in fixture["nodes"] if node["id"] == "curtain-1")
+    dream_curtain.update({"type": 6, "pt": 22})
+    dream_curtain["params"].update({"cra": 119, "tra": 119, "trs": 1})
+    gateway = FakeGateway(fixture)
+    monkeypatch.setattr(
+        "custom_components.yeelight_pro.coordinator.YeelightProGateway",
+        lambda *args, **kwargs: gateway,
+    )
+    entry = await _setup_entry(hass, gateway, reversed_dream_curtain_node_ids=["curtain-1"])
+
+    try:
+        slat_number_id = _entity_id_for_unique_id(hass, entry.entry_id, "_curtain-1_slat_position")
+        reverse_switch_id = _entity_id_for_unique_id(hass, entry.entry_id, "_curtain-1_reverse_slat_direction")
+
+        assert hass.states.get(reverse_switch_id).state == STATE_ON
+        assert float(hass.states.get(slat_number_id).state) == 34
+
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {ATTR_ENTITY_ID: slat_number_id, "value": 66},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        assert gateway.commands[-1].to_payload()["set"] == {"tra": 61}
+
+        await hass.services.async_call(
+            "switch",
+            "turn_off",
+            {ATTR_ENTITY_ID: reverse_switch_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+        assert entry.options.get(CONF_REVERSED_DREAM_CURTAIN_NODE_IDS, []) == []
+        assert hass.states.get(reverse_switch_id).state == STATE_OFF
+        assert float(hass.states.get(slat_number_id).state) == 66
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_cover_fabric_services_send_standard_commands(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],
 ) -> None:
@@ -1904,26 +2064,6 @@ async def test_cover_services_send_standard_commands(
         await hass.async_block_till_done()
         assert gateway.commands[-1].to_payload()["action"] == {"motorAdjust": {"type": "pause"}}
         assert not gateway.has_pending_write("curtain-1")
-
-        await hass.services.async_call(
-            "cover",
-            "set_cover_tilt_position",
-            {ATTR_ENTITY_ID: cover_entity_id, ATTR_TILT_POSITION: 50},
-            blocking=True,
-        )
-        await hass.async_block_till_done()
-        assert gateway.commands[-1].to_payload()["set"] == {"tra": 90}
-        assert not gateway.has_pending_write("curtain-1")
-
-        gateway.update_node_params(
-            "curtain-1",
-            {
-                MOTOR_TRACKING_TARGET_ANGLE: 90,
-                MOTOR_TRACKING_ANGLE_MOTION: "opening",
-            },
-        )
-        await hass.async_block_till_done()
-        assert hass.states.get(cover_entity_id).state == CoverState.OPEN
     finally:
         await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
@@ -1934,16 +2074,20 @@ async def _setup_entry(
     gateway: FakeGateway,
     *,
     import_room_ids: list[str] | None = None,
+    reversed_dream_curtain_node_ids: list[str] | None = None,
     switch_modes: dict[str, str] | None = None,
     before_setup: Callable[[MockConfigEntry], None] | None = None,
 ) -> MockConfigEntry:
+    options = {
+        CONF_IMPORT_ROOM_IDS: import_room_ids or [],
+        CONF_SWITCH_MODES: switch_modes or {},
+    }
+    if reversed_dream_curtain_node_ids is not None:
+        options[CONF_REVERSED_DREAM_CURTAIN_NODE_IDS] = reversed_dream_curtain_node_ids
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_HOST: "127.0.0.1", CONF_PORT: 65443},
-        options={
-            CONF_IMPORT_ROOM_IDS: import_room_ids or [],
-            CONF_SWITCH_MODES: switch_modes or {},
-        },
+        options=options,
     )
     entry.add_to_hass(hass)
     if before_setup is not None:

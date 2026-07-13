@@ -36,9 +36,11 @@ class PackagingLayoutTests(unittest.TestCase):
 
         for translations in (strings, en, zh_hans):
             self.assertEqual(translations["entity"]["switch"]["relay"]["name"].count("{channel}"), 1)
+            self.assertIn("reverse_slat_direction", translations["entity"]["switch"])
             self.assertIn("air_conditioner", translations["entity"]["climate"])
             self.assertIn("ventilation", translations["entity"]["fan"])
             self.assertIn("delay_off", translations["entity"]["number"])
+            self.assertIn("slat_position", translations["entity"]["number"])
             self.assertIn("bath_mode", translations["entity"]["select"])
             self.assertIn("motion", translations["entity"]["binary_sensor"])
             self.assertIn("occupancy", translations["entity"]["binary_sensor"])

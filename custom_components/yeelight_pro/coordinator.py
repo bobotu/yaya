@@ -15,6 +15,7 @@ from .const import (
     CONF_DEFAULT_LIGHT_TRANSITION,
     CONF_IMPORT_ROOM_IDS,
     CONF_LIGHT_BATCH_DELAY_STEP_MS,
+    CONF_REVERSED_DREAM_CURTAIN_NODE_IDS,
     CONF_SWITCH_MODES,
     DEFAULT_HEARTBEAT_WATCHDOG_INTERVAL,
     DEFAULT_LIGHT_BATCH_DELAY_STEP_MS,
@@ -233,6 +234,33 @@ class YeelightProCoordinator(DataUpdateCoordinator[dict[str, TopologyNode]]):
         if switch_node_is_relay_mode(node, self.switch_modes):
             return False
         return True
+
+    @property
+    def reversed_dream_curtain_node_ids(self) -> frozenset[str]:
+        configured = self.entry.options.get(CONF_REVERSED_DREAM_CURTAIN_NODE_IDS, [])
+        if not isinstance(configured, list):
+            return frozenset()
+        return frozenset(str(node_id) for node_id in configured)
+
+    def dream_curtain_slats_reversed(self, node_id: str | int) -> bool:
+        return node_key(node_id) in self.reversed_dream_curtain_node_ids
+
+    @callback
+    def async_set_dream_curtain_slats_reversed(self, node_id: str | int, reversed_: bool) -> None:
+        configured = set(self.reversed_dream_curtain_node_ids)
+        key = node_key(node_id)
+        if (key in configured) == reversed_:
+            return
+        if reversed_:
+            configured.add(key)
+        else:
+            configured.discard(key)
+        options = dict(self.entry.options)
+        if configured:
+            options[CONF_REVERSED_DREAM_CURTAIN_NODE_IDS] = sorted(configured)
+        else:
+            options.pop(CONF_REVERSED_DREAM_CURTAIN_NODE_IDS, None)
+        self.hass.config_entries.async_update_entry(self.entry, options=options)
 
     def diagnostics(self) -> dict[str, Any]:
         snapshot = self.gateway.snapshot_diagnostics()
