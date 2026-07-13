@@ -90,9 +90,18 @@ custom **Integration** repository, install it, restart Home Assistant, and add
 ## Supported mapping
 
 - `light`: imports known light nodes, including light groups (`nt=4`).
-- `cover`: maps curtains to open, close, stop, and target position. Dream
-  curtain tilt is enabled when the gateway reports `type=22` or explicit
-  curtain subtype `pt=22`.
+- `cover`: maps curtains, including dream curtains, to fabric open, close,
+  stop, and target position.
+- `number`: exposes dream-curtain slat position when the gateway reports
+  `type=22` or explicit curtain subtype `pt=22`. The 0..100 axis keeps both
+  closed directions: by default 0 is left-closed, 50 is centered/open to
+  light, and 100 is right-closed. It is deliberately not exposed as standard
+  cover tilt, whose single-ended closed-to-open model cannot represent this
+  geometry.
+- `switch` configuration entity `Reverse slat direction`: swaps the exposed
+  dream-curtain slat endpoints for installations whose left/right orientation
+  is reversed. It defaults off, leaves the centered value 50 unchanged, and
+  never changes the gateway's raw observations.
 - `switch`: exposes relay channels for multi-switch and double-switch devices
   configured in relay mode.
 - `event`: exposes wireless-mode multi-key switches, scene panels, and knobs as
@@ -102,7 +111,7 @@ custom **Integration** repository, install it, restart Home Assistant, and add
 - `sensor` / `binary_sensor`: exposes battery, charging, motion, occupancy,
   door, alarm, temperature, humidity, luminance, and related states when the
   gateway reports the underlying properties.
-- `climate`, `fan`, `number`, and `select`: expose the subset of air conditioner
+- `climate`, `fan`, and `select`: expose the subset of air conditioner
   controller and bath heater features that were observed in my local setup.
 
 Entities are created from topology-backed nodes only. Property pushes for
@@ -112,12 +121,21 @@ are merged defensively; a node missing from a push is not treated as deleted. If
 an authoritative full topology sync no longer reports a previously known node,
 its existing entities remain registered but become unavailable.
 
+Dream-curtain automations created before the separate slat entity must migrate
+from `cover.set_cover_tilt_position` to `number.set_value`. The numeric value is
+unchanged (for example, 66 remains 66); 50 is the centered light-open position,
+while 0 and 100 select the two closed directions. Generic cover-tilt open,
+close, and toggle actions cannot express that three-state geometry and should
+be replaced with explicit number values. Use the fabric cover's stop action to
+send the same device-level pause command previously used by the tilt stop
+action.
+
 ## Modeling notes
 
 - `pt` is not used as a general fallback for `type`. It is used only for
   explicit subtypes observed on otherwise known devices, such as `type=128,
   pt=137` for a knob-capable control panel and `type=6, pt=22` for dream-curtain
-  tilt.
+  slats.
 - Multi-key and double relay switches default to relay mode. The config/options
   flow lets users mark individual devices as wireless switch mode.
 - Relay mode exposes controllable relay switch entities and filters button

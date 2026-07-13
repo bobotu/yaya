@@ -30,9 +30,11 @@ from yeelight_pro.gateway.devices import (  # noqa: E402
     MotionSensorDevice,
     MultiSwitchDevice,
     ProgrammableSwitchDevice,
+    angle_to_slat_position,
     create_device,
     curtain_position_known,
     curtain_tilt_position_known,
+    slat_position_to_angle,
 )
 
 
@@ -196,16 +198,34 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
 
         await curtain.set_position(40)
         await curtain.set_angle(90)
+        await curtain.set_slat_position(66)
         await curtain.stop()
 
         self.assertEqual(curtain.current_position, 20)
+        self.assertEqual(curtain.current_slat_position, 25)
         self.assertTrue(curtain.is_route_calibrated)
         self.assertEqual(self.executor.commands[0].to_payload()["set"], {"tp": 40})
         self.assertEqual(self.executor.commands[1].to_payload()["set"], {"tra": 90})
+        self.assertEqual(self.executor.commands[2].to_payload()["set"], {"tra": 119})
         self.assertEqual(
-            self.executor.commands[2].to_payload()["action"],
+            self.executor.commands[3].to_payload()["action"],
             {"motorAdjust": {"type": str(MotorAction.PAUSE)}},
         )
+
+    async def test_dream_curtain_slat_position_preserves_both_closed_directions(self) -> None:
+        cases = ((0, 0), (50, 90), (66, 119), (100, 180))
+
+        for position, angle in cases:
+            with self.subTest(position=position, angle=angle):
+                self.assertEqual(slat_position_to_angle(position), angle)
+                self.assertEqual(angle_to_slat_position(angle), position)
+
+        curtain = create_device(self.nodes["curtain-1"], self.executor)
+        assert isinstance(curtain, DreamCurtainDevice)
+        with self.assertRaises(ValueError):
+            await curtain.set_slat_position(-1)
+        with self.assertRaises(ValueError):
+            await curtain.set_slat_position(101)
 
     async def test_curtain_position_is_unknown_when_route_state_is_lost(self) -> None:
         lost = TopologyNode.from_mapping(

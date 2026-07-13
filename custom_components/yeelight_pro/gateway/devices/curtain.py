@@ -51,6 +51,11 @@ class DreamCurtainDevice(CurtainDevice):
         return _int_or_none(self.node.params.get("cra"))
 
     @property
+    def current_slat_position(self) -> int | None:
+        angle = self.current_angle
+        return None if angle is None else angle_to_slat_position(angle)
+
+    @property
     def target_angle(self) -> int | None:
         return _int_or_none(self.node.params.get("tra"))
 
@@ -66,6 +71,10 @@ class DreamCurtainDevice(CurtainDevice):
     async def set_angle(self, angle: int, *, duration: int | None = None) -> dict[str, Any]:
         self._validate_range("angle", angle, 0, 180)
         return await self.set_props({"tra": angle}, duration=duration)
+
+    async def set_slat_position(self, position: int, *, duration: int | None = None) -> dict[str, Any]:
+        self._validate_range("slat position", position, 0, 100)
+        return await self.set_angle(slat_position_to_angle(position), duration=duration)
 
     async def open_tilt(self, *, duration: int | None = None) -> dict[str, Any]:
         return await self.set_angle(180, duration=duration)
@@ -85,3 +94,11 @@ def curtain_position_known(node: TopologyNode) -> bool:
 def curtain_tilt_position_known(node: TopologyNode) -> bool:
     tilt_route_state = _int_or_none(node.params.get("trs"))
     return tilt_route_state != 0
+
+
+def angle_to_slat_position(angle: int) -> int:
+    return max(0, min(100, round(angle * 100 / 180)))
+
+
+def slat_position_to_angle(position: int) -> int:
+    return max(0, min(180, round(position * 180 / 100)))

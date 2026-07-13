@@ -35,6 +35,10 @@ def node_identifier(gateway_id: str, node_id: str | int) -> str:
     return f"{gateway_id}:{node_key(node_id)}"
 
 
+def orient_dream_curtain_slat_position(position: int, *, reversed_: bool) -> int:
+    return 100 - position if reversed_ else position
+
+
 def device_type(node: TopologyNode) -> DeviceType | None:
     try:
         return DeviceType(node.type)

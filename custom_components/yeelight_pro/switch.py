@@ -10,6 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import YeelightProCoordinator
 from .entity import YeelightProEntity, async_set_node_props
+from .gateway import is_dream_curtain
 from .gateway.topology import DeviceType
 from .helpers import (
     bool_param,
@@ -49,6 +50,8 @@ def _switch_entities_for_node(coordinator: YeelightProCoordinator, node: Any) ->
         if (is_multi_switch_node(node) or is_double_switch_node(node))
         and coordinator.exposes_relay_switches_for_node(node)
     ]
+    if is_dream_curtain(node):
+        entities.append(YeelightProDreamCurtainSlatDirectionSwitch(coordinator, node))
     if "0-blp" in node.params:
         entities.append(YeelightProPropertySwitch(coordinator, node, "0-blp", "backlight"))
     if device_type(node) in {DeviceType.AIR_CONDITION, DeviceType.AIR_CONDITION_VRF}:
@@ -136,3 +139,29 @@ class YeelightProPropertySwitch(YeelightProEntity, SwitchEntity):
     async def _async_set_value(self, value: bool) -> None:
         node = self.require_current_node()
         await async_set_node_props(self.coordinator, node, {self._prop: value})
+
+
+class YeelightProDreamCurtainSlatDirectionSwitch(YeelightProEntity, SwitchEntity):
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:swap-horizontal"
+    _attr_translation_key = "reverse_slat_direction"
+
+    def __init__(self, coordinator: YeelightProCoordinator, node: Any) -> None:
+        super().__init__(coordinator, node, "reverse_slat_direction")
+
+    @property
+    def is_on(self) -> bool | None:
+        node = self.node
+        if node is None:
+            return None
+        return self.coordinator.dream_curtain_slats_reversed(node.id)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self._async_set_reversed(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self._async_set_reversed(False)
+
+    def _async_set_reversed(self, reversed_: bool) -> None:
+        node = self.require_current_node()
+        self.coordinator.async_set_dream_curtain_slats_reversed(node.id, reversed_)

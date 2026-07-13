@@ -16,6 +16,7 @@ DEFAULT_HEARTBEAT_WATCHDOG_INTERVAL = timedelta(minutes=11, seconds=30)
 CONF_IMPORT_ROOM_IDS = "import_room_ids"
 CONF_DEFAULT_LIGHT_TRANSITION = "default_light_transition"
 CONF_LIGHT_BATCH_DELAY_STEP_MS = "light_batch_delay_step_ms"
+CONF_REVERSED_DREAM_CURTAIN_NODE_IDS = "reversed_dream_curtain_node_ids"
 CONF_SWITCH_MODES = "switch_modes"
 CONF_WIRELESS_SWITCH_NODE_IDS = "wireless_switch_node_ids"
 

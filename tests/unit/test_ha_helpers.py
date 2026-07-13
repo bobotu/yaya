@@ -58,6 +58,7 @@ event_subtypes_for_node = helpers.event_subtypes_for_node
 event_types_for_node = helpers.event_types_for_node
 indexed_props = helpers.indexed_props
 int_param = helpers.int_param
+orient_dream_curtain_slat_position = helpers.orient_dream_curtain_slat_position
 relay_channel_numbers = helpers.relay_channel_numbers
 should_import_node = helpers.should_import_node
 switch_mode_for_node = helpers.switch_mode_for_node
@@ -109,6 +110,18 @@ class HomeAssistantHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(indexed_props(node, "acrc"), ("2-acrc", "10-acrc"))
+
+    def test_dream_curtain_slat_orientation_swaps_only_the_endpoints(self) -> None:
+        for position in (0, 50, 66, 100):
+            with self.subTest(position=position):
+                self.assertEqual(
+                    orient_dream_curtain_slat_position(position, reversed_=False),
+                    position,
+                )
+                self.assertEqual(
+                    orient_dream_curtain_slat_position(position, reversed_=True),
+                    100 - position,
+                )
 
     def test_knob_panel_without_channel_metadata_exports_wide_idx_fallback(self) -> None:
         node = TopologyNode.from_mapping(

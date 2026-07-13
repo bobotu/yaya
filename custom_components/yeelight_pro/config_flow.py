@@ -16,6 +16,7 @@ from .const import (
     CONF_DEFAULT_LIGHT_TRANSITION,
     CONF_IMPORT_ROOM_IDS,
     CONF_LIGHT_BATCH_DELAY_STEP_MS,
+    CONF_REVERSED_DREAM_CURTAIN_NODE_IDS,
     CONF_SWITCH_MODES,
     CONF_WIRELESS_SWITCH_NODE_IDS,
     DEFAULT_LIGHT_BATCH_DELAY_STEP_MS,
@@ -111,7 +112,14 @@ class YeelightProOptionsFlow(config_entries.OptionsFlow):
             switch_options = getattr(
                 self, "_switch_options", _selected_switch_options(self.config_entry.options.get(CONF_SWITCH_MODES, {}))
             )
-            return self.async_create_entry(title="", data=_options_data(user_input, switch_options=switch_options))
+            return self.async_create_entry(
+                title="",
+                data=_options_data(
+                    user_input,
+                    switch_options=switch_options,
+                    preserved_options=self.config_entry.options,
+                ),
+            )
 
         errors: dict[str, str] = {}
         try:
@@ -225,9 +233,10 @@ def _options_data(
     user_input: dict[str, Any],
     *,
     switch_options: list[selector.SelectOptionDict],
+    preserved_options: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     wireless_switch_node_ids = {str(node_id) for node_id in user_input.get(CONF_WIRELESS_SWITCH_NODE_IDS, [])}
-    return {
+    options = {
         CONF_DEFAULT_LIGHT_TRANSITION: user_input.get(CONF_DEFAULT_LIGHT_TRANSITION, DEFAULT_LIGHT_TRANSITION),
         CONF_LIGHT_BATCH_DELAY_STEP_MS: user_input.get(
             CONF_LIGHT_BATCH_DELAY_STEP_MS, DEFAULT_LIGHT_BATCH_DELAY_STEP_MS
@@ -240,6 +249,10 @@ def _options_data(
             for option in switch_options
         },
     }
+    reversed_node_ids = (preserved_options or {}).get(CONF_REVERSED_DREAM_CURTAIN_NODE_IDS, [])
+    if isinstance(reversed_node_ids, list) and reversed_node_ids:
+        options[CONF_REVERSED_DREAM_CURTAIN_NODE_IDS] = sorted({str(node_id) for node_id in reversed_node_ids})
+    return options
 
 
 def _room_options(rooms: list[Mapping[str, Any]] | Any) -> list[selector.SelectOptionDict]:

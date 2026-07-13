@@ -117,6 +117,9 @@
       },
       "heat_level": {
         "name": "Heat level"
+      },
+      "slat_position": {
+        "name": "Slat position"
       }
     },
     "select": {
@@ -147,6 +150,9 @@
       },
       "remote_controller": {
         "name": "Remote controller"
+      },
+      "reverse_slat_direction": {
+        "name": "Reverse slat direction"
       },
       "relay": {
         "name": "Relay {channel}"
