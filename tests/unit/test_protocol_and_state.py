@@ -137,6 +137,90 @@ class ProtocolAndStateTests(unittest.TestCase):
             )
         )
 
+    def test_sparse_topology_preserves_known_node_metadata(self) -> None:
+        for replace in (False, True):
+            with self.subTest(replace=replace):
+                state = GatewaySnapshot()
+                state.apply_topology(
+                    {
+                        "nodes": [
+                            {
+                                "id": "switch-1",
+                                "nt": 2,
+                                "type": 13,
+                                "pid": 42,
+                                "name": "Hall switch",
+                                "rid": "room-1",
+                                "ch_num": 3,
+                                "cids": [13, 128],
+                                "o": True,
+                                "params": {"1-sp": True},
+                            }
+                        ]
+                    }
+                )
+                state.apply_properties({"nodes": [{"id": "switch-1", "pt": 13}]})
+                before = state.nodes["switch-1"]
+                state.apply_topology({"nodes": [{"id": "switch-1"}]}, replace=replace)
+                self.assertEqual(state.nodes["switch-1"], before)
+                state.apply_properties({"nodes": [{"id": "switch-1", "pt": 13}]})
+                self.assertEqual(state.nodes["switch-1"], before)
+
+    def test_topology_explicit_metadata_updates_are_applied(self) -> None:
+        state = GatewaySnapshot()
+        state.apply_topology(
+            {
+                "nodes": [
+                    {
+                        "id": "switch-1",
+                        "nt": 2,
+                        "type": 13,
+                        "pt": 13,
+                        "pid": 42,
+                        "rid": "room-1",
+                        "ch_num": 3,
+                        "cids": [13],
+                        "o": True,
+                    }
+                ]
+            }
+        )
+        state.apply_topology(
+            {
+                "nodes": [
+                    {
+                        "id": "switch-1",
+                        "nt": 4,
+                        "type": 3,
+                        "pt": None,
+                        "pid": None,
+                        "rid": None,
+                        "ch_num": 0,
+                        "cids": [],
+                        "o": False,
+                    }
+                ]
+            },
+            replace=False,
+        )
+        node = state.nodes["switch-1"]
+        self.assertEqual((node.nt, node.type, node.channel_count), (4, 3, 0))
+        self.assertIsNone(node.property_type)
+        self.assertIsNone(node.product_id)
+        self.assertIsNone(node.room_id)
+        self.assertEqual(node.component_type_ids, ())
+        self.assertFalse(node.online)
+
+    def test_unknown_sparse_properties_preserve_values_and_topology_metadata(self) -> None:
+        state = GatewaySnapshot()
+        state.apply_properties({"nodes": [{"id": "light-1", "params": {"p": True}}]})
+        state.apply_properties({"nodes": [{"id": "light-1", "params": {"l": 42}}]})
+        state.apply_topology({"nodes": [{"id": "light-1", "nt": 4, "type": 3, "pt": 3}]})
+        node = state.nodes["light-1"]
+        self.assertEqual(node.params, {"p": True, "l": 42})
+        self.assertEqual(node.nt, 4)
+        self.assertEqual(node.property_type, 3)
+
     def test_full_property_coverage_requires_full_snapshot_marker(self) -> None:
         state = GatewaySnapshot()
         state.apply_topology(
@@ -230,10 +314,10 @@ class ProtocolAndStateTests(unittest.TestCase):
         self.assertEqual(unknown.count, 2)
         self.assertEqual(unknown.nt, 2)
         self.assertEqual(unknown.property_type, None)
-        self.assertEqual(unknown.params, {"l": 42})
+        self.assertEqual(unknown.params, {"p": True, "l": 42})
         self.assertEqual(
             state.unknown_summary(),
-            {"count": 1, "by_shape": {"nt=2;pt=None;params=l": 1}},
+            {"count": 1, "by_shape": {"nt=2;pt=None;params=l,p": 1}},
         )
 
     def test_topology_claims_previously_unknown_property_node(self) -> None:
