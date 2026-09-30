@@ -669,6 +669,49 @@ async def test_stale_entity_cleanup_does_not_match_node_id_prefix_collision(
         await hass.async_block_till_done()
 
 
+@pytest.mark.parametrize("full_sync", [False, True])
+async def test_sparse_topology_does_not_republish_button_event(
+    hass: HomeAssistant,
+    topology_fixture: dict[str, Any],
+    full_sync: bool,
+) -> None:
+    fixture = deepcopy(topology_fixture)
+    knob = next(node for node in fixture["nodes"] if node["id"] == "knob-panel-1")
+    knob["pt"] = 132
+    gateway = FakeGateway(fixture)
+    entry = await _setup_entry(hass, gateway)
+
+    try:
+        gateway.emit_event(GatewayEvent(id="knob-panel-1", nt=2, value="panel.click", params={"key": 1}))
+        await hass.async_block_till_done()
+        entity_id = _entity_id_for_unique_id(hass, entry.entry_id, "_knob-panel-1_control_1_events")
+        before = hass.states.get(entity_id)
+        assert before is not None
+        assert before.attributes["property_type"] == 132
+
+        state_changes: list[Event] = []
+        gateway_events: list[Event] = []
+        hass.bus.async_listen("state_changed", state_changes.append)
+        hass.bus.async_listen(EVENT_YEELIGHT_PRO, gateway_events.append)
+        sparse_fixture = deepcopy(fixture)
+        next(node for node in sparse_fixture["nodes"] if node["id"] == "knob-panel-1").pop("pt")
+        if full_sync:
+            gateway.replace_topology(sparse_fixture)
+        else:
+            gateway.push_topology(sparse_fixture)
+        await hass.async_block_till_done()
+
+        after = hass.states.get(entity_id)
+        assert after is not None
+        assert after.state == before.state
+        assert after.attributes == before.attributes
+        assert not any(event.data["entity_id"] == entity_id for event in state_changes)
+        assert gateway_events == []
+    finally:
+        await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+
 async def test_knob_event_bus_payload_and_device_triggers(
     hass: HomeAssistant,
     topology_fixture: dict[str, Any],

@@ -28,7 +28,7 @@ class UnknownPropertyNode:
     def update(self, item: Mapping[str, Any]) -> None:
         self.last_seen = datetime.now(UTC)
         self.count += 1
-        self.params = _mapping_or_empty(item.get("params"))
+        self.params = {**self.params, **_mapping_or_empty(item.get("params"))}
         self.nt = _int_or_none(item.get("nt")) if "nt" in item else self.nt
         self.property_type = _int_or_none(item.get("pt")) if "pt" in item else self.property_type
 
@@ -48,25 +48,23 @@ class GatewaySnapshot:
         topology = Topology.from_message(message)
         nodes = {} if replace else dict(self.nodes)
         present_node_ids: set[str | int] = set()
-        for node in topology.nodes:
+        for item in list_payload(message, "nodes"):
+            node = TopologyNode.from_mapping(item)
             present_node_ids.add(node.id)
             current = self.nodes.get(node.id)
             if current is not None:
-                params = dict(current.params)
-                params.update(node.params)
                 current_online = current.online if node.id in self.topology_node_ids else None
                 online = node.online if node.online is not None else current_online
-                node = dataclass_replace(node, params=params, online=online)
+                # Topology can omit metadata previously supplied by property pushes.
+                node = dataclass_replace(current.merge_update(item), online=online)
             unknown = self.unknown_property_nodes.pop(node.id, None)
             if unknown is not None:
-                node = node.merge_update(
-                    {
-                        "id": unknown.id,
-                        "nt": unknown.nt,
-                        "pt": unknown.property_type,
-                        "params": unknown.params,
-                    }
-                )
+                update: dict[str, Any] = {"params": unknown.params}
+                if unknown.nt is not None:
+                    update["nt"] = unknown.nt
+                if unknown.property_type is not None:
+                    update["pt"] = unknown.property_type
+                node = node.merge_update(update)
             nodes[node.id] = node
         if replace:
             for node_id, current in self.nodes.items():
